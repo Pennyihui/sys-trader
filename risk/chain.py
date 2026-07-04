@@ -29,10 +29,12 @@ class MiddlewareChain:
 
     def process(self, signal: Signal, portfolio: PortfolioTracker) -> MiddlewareResult:
         current_signal = signal
+        modifications: Dict[str, Any] = {}
         for mw in self._middleware:
             result = mw.process(current_signal, portfolio)
             if result.rejected:
                 return result
             if result.signal is not None:
                 current_signal = result.signal
-        return MiddlewareResult(rejected=False, signal=current_signal)
+            modifications.update(result.modifications)
+        return MiddlewareResult(rejected=False, signal=current_signal, modifications=modifications)
