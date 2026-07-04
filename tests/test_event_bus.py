@@ -1,0 +1,62 @@
+import json
+import time
+import uuid
+import pytest
+from unittest.mock import patch, MagicMock
+from shared.event_bus import EventBus, Event
+
+
+class TestEventBus:
+    def setup_method(self):
+        self.bus = EventBus(redis_url="redis://localhost:6379", prefix="test")
+
+    def test_publish_sends_message_to_stream(self):
+        bus = self.bus
+        data = {"symbol": "BTCUSDT", "price": 62500.0}
+
+        with patch.object(bus.redis, "xadd") as mock_xadd:
+            mock_xadd.return_value = "12345-0"
+            event_id = bus.publish("test.stream", data)
+
+        mock_xadd.assert_called_once()
+        args = mock_xadd.call_args
+        assert "test:test.stream" in args[0][0] or args[0][0] == "test:test.stream"
+        assert event_id is not None
+
+    def test_event_has_required_fields(self):
+        event = Event(stream="signal.generated", data={"symbol": "BTCUSDT", "direction": "LONG"})
+
+        assert isinstance(event.event_id, str)
+        assert len(event.event_id) > 0
+        assert event.stream == "signal.generated"
+        assert event.data["symbol"] == "BTCUSDT"
+        assert event.data["direction"] == "LONG"
+        assert isinstance(event.timestamp, str)
+
+    def test_subscribe_reads_from_stream(self):
+        bus = self.bus
+        handler_called = []
+
+        def handler(event):
+            handler_called.append(event)
+
+        test_event = Event(stream="kline.closed", data={"symbol": "BTCUSDT", "timeframe": "4h"})
+        raw = json.dumps({"event_id": test_event.event_id, "stream": test_event.stream, "timestamp": test_event.timestamp, "data": test_event.data})
+
+        with patch.object(bus.redis, "xreadgroup") as mock_read, patch.object(bus.redis, "xack") as mock_xack:
+            mock_read.return_value = [[b"test:kline.closed", [(b"msg-1", {b"payload": raw.encode()})]]]
+            bus._poll_once("kline.closed", "test-group", handler)
+
+        assert len(handler_called) == 1
+        assert handler_called[0].stream == "kline.closed"
+        assert handler_called[0].data["symbol"] == "BTCUSDT"
+
+    def test_message_is_valid_json_roundtrip(self):
+        original = Event(stream="order.filled", data={"symbol": "ETHUSDT", "qty": 0.5, "price": 3100.0})
+        raw = json.dumps({"event_id": original.event_id, "stream": original.stream, "timestamp": original.timestamp, "data": original.data})
+        parsed = json.loads(raw)
+
+        assert parsed["event_id"] == original.event_id
+        assert parsed["stream"] == original.stream
+        assert parsed["data"]["symbol"] == "ETHUSDT"
+        assert parsed["data"]["qty"] == 0.5
