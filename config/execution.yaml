@@ -1,0 +1,8 @@
+execution:
+  order_timeout_seconds: 60
+  partial_fill_wait_seconds: 30
+  max_retries: 3
+  retry_backoff_base: 1
+  testnet: true
+  api_key_env: BINANCE_API_KEY
+  api_secret_env: BINANCE_API_SECRET

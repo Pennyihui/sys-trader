@@ -1,0 +1,11 @@
+symbols:
+  primary:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+  secondary:
+    - BNBUSDT
+    - DOGEUSDT
+    - AVAXUSDT
+    - LINKUSDT
+    - ARBUSDT

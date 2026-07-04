@@ -1,0 +1,10 @@
+risk:
+  risk_per_trade: 0.015
+  max_leverage: 5
+  max_position_per_symbol: 0.30
+  max_same_direction: 0.50
+  max_total_margin: 0.80
+  max_drawdown: 0.15
+  daily_loss_limit: 0.05
+  consecutive_loss_breaker: 3
+  cooldown_minutes: 120
