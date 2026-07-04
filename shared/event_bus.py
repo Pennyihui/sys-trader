@@ -1,11 +1,16 @@
 """Event Bus backed by Redis Streams — module communication backbone."""
 
 import json
+import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 import redis
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -20,7 +25,7 @@ class EventBus:
     def __init__(self, redis_url: str = "redis://localhost:6379", prefix: str = "systrader"):
         self.redis = redis.Redis.from_url(redis_url, decode_responses=True)
         self.prefix = prefix
-        self._consumers: dict[str, list] = {}
+        self._stop = threading.Event()
 
     def _key(self, stream: str) -> str:
         return f"{self.prefix}:{stream}"
@@ -31,21 +36,19 @@ class EventBus:
         msg_id = self.redis.xadd(self._key(stream), {"payload": payload}, maxlen=10000)
         return msg_id
 
-    def subscribe(self, stream: str, consumer_group: str, handler: Callable[[Event], None]):
+    def subscribe(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
         key = self._key(stream)
         try:
-            self.redis.xgroup_create(key, consumer_group, id="0", mkstream=True)
+            self.redis.xgroup_create(key, consumer_group, id="$", mkstream=True)
         except redis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
-        if stream not in self._consumers:
-            self._consumers[stream] = []
-        self._consumers[stream].append((consumer_group, handler))
+        self.run_consumer(stream, consumer_group, handler, count=count, block=block)
 
-    def _poll_once(self, stream: str, consumer_group: str, handler: Callable[[Event], None]):
+    def _poll_once(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
         key = self._key(stream)
         consumer_id = f"{consumer_group}-{uuid.uuid4().hex[:8]}"
-        results = self.redis.xreadgroup(consumer_group, key, {key: ">"}, count=5, block=100)
+        results = self.redis.xreadgroup(consumer_group, consumer_id, {key: ">"}, count=count, block=block)
         if results:
             for _stream_key, messages in results:
                 for msg_id, fields in messages:
@@ -55,11 +58,13 @@ class EventBus:
                     handler(event)
                     self.redis.xack(key, consumer_group, msg_id)
 
-    def run_consumer(self, stream: str, consumer_group: str, handler: Callable[[Event], None]):
-        import time
-        while True:
+    def run_consumer(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
+        while not self._stop.is_set():
             try:
-                self._poll_once(stream, consumer_group, handler)
+                self._poll_once(stream, consumer_group, handler, count=count, block=block)
             except Exception as e:
-                print(f"EventBus consumer error [{stream}/{consumer_group}]: {e}")
-                time.sleep(1)
+                logger.error("EventBus consumer error [%s/%s]: %s", stream, consumer_group, e)
+                self._stop.wait(timeout=1)
+
+    def stop(self):
+        self._stop.set()
