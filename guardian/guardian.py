@@ -18,6 +18,8 @@ from execution.order_gateway import OrderGateway, OrderRequest
 
 logger = logging.getLogger(__name__)
 
+_ATR_STALE_SECONDS = 240  # 4h K线每240s检查一次ATR是否需更新
+
 
 @dataclass
 class GuardianConfig:
@@ -40,6 +42,8 @@ class PositionState:
     current_stop: float
     tp1_done: bool = False
     tp2_done: bool = False
+    tp1_attempt_ts: float = 0.0
+    tp2_attempt_ts: float = 0.0
 
 
 class PositionGuardian:
@@ -58,6 +62,7 @@ class PositionGuardian:
         self.config = config or GuardianConfig()
         self._position_state: Dict[str, PositionState] = {}
         self._atr_cache: Dict[str, float] = {}
+        self._atr_last_update: Dict[str, float] = {}
         self._running = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -77,10 +82,19 @@ class PositionGuardian:
             tr_sum += tr
         return tr_sum / (len(kl) - 1)
 
+    def _ensure_atr(self, symbol: str) -> float:
+        """惰性更新 ATR，避免每秒重复计算。"""
+        now = time.time()
+        last = self._atr_last_update.get(symbol, 0.0)
+        if symbol not in self._atr_cache or now - last > _ATR_STALE_SECONDS:
+            self._atr_cache[symbol] = self._calc_atr(symbol)
+            self._atr_last_update[symbol] = now
+        return self._atr_cache[symbol]
+
     # ─── 初始状态 ───
 
     def _init_position(self, symbol: str, direction: str, entry_price: float):
-        atr = self._calc_atr(symbol)
+        atr = self._ensure_atr(symbol)
         stop_distance = max(atr * self.config.stop_atr_multiple, entry_price * 0.01)
         stop = entry_price - stop_distance if direction == "LONG" else entry_price + stop_distance
         self._position_state[symbol] = PositionState(
@@ -88,78 +102,67 @@ class PositionGuardian:
             entry_price=entry_price, highest_price=entry_price,
             current_stop=round(stop, 2),
         )
-        self._atr_cache[symbol] = atr
 
     # ─── 跟踪止损 ───
 
     def _check_trailing(self, state: PositionState, current_price: float):
-        """价格朝有利方向变动时移动止损。
+        """价格朝有利方向变动时移动止损，用方向符号统一 LONG/SHORT。
 
         LONG:  stop = highest_price × (1 - trail_pct)
         SHORT: stop = highest_price × (1 + trail_pct)
         """
-        if state.direction == "LONG":
-            if current_price > state.highest_price:
-                state.highest_price = current_price
-            if current_price <= state.entry_price * (1 + self.config.trailing_activation_pct):
-                return
-            trail_pct = self._stop_pct(state.symbol)
-            new_stop = round(state.highest_price * (1 - trail_pct), 2)
-            min_step = round(state.highest_price * self.config.trailing_step_pct, 2)
-            if new_stop > state.current_stop + min_step:
-                state.current_stop = new_stop
-                logger.info(f"[Guardian] {state.symbol} 跟踪止损上移 → {state.current_stop}")
-        else:
-            if current_price < state.highest_price:
-                state.highest_price = current_price
-            if current_price >= state.entry_price * (1 - self.config.trailing_activation_pct):
-                return
-            trail_pct = self._stop_pct(state.symbol)
-            new_stop = round(state.highest_price * (1 + trail_pct), 2)
-            min_step = round(state.highest_price * self.config.trailing_step_pct, 2)
-            if new_stop < state.current_stop - min_step:
-                state.current_stop = new_stop
-                logger.info(f"[Guardian] {state.symbol} 跟踪止损下移 → {state.current_stop}")
-
-    def _stop_pct(self, symbol: str) -> float:
-        """根据 ATR 计算止损距离百分比。"""
-        atr = self._atr_cache.get(symbol, 500.0)
-        price = self.feed.get_last_price(symbol) or 50000.0
-        return min(atr * self.config.stop_atr_multiple / price, 0.05)
+        sign = 1 if state.direction == "LONG" else -1
+        if current_price * sign > state.highest_price * sign:
+            state.highest_price = current_price
+        if current_price * sign <= state.entry_price * (1 + sign * self.config.trailing_activation_pct) * sign:
+            return
+        trail_pct = min(
+            self._atr_cache.get(state.symbol, 500.0) * self.config.stop_atr_multiple / current_price,
+            0.05,
+        )
+        new_stop = round(state.highest_price * (1 - sign * trail_pct), 2)
+        min_step = round(state.highest_price * self.config.trailing_step_pct, 2)
+        if new_stop * sign > state.current_stop * sign + min_step:
+            state.current_stop = new_stop
+            direction_label = "上移" if state.direction == "LONG" else "下移"
+            logger.info(f"[Guardian] {state.symbol} 跟踪止损{direction_label} → {state.current_stop}")
 
     # ─── 部分止盈 ───
 
+    def _exec_tp_tier(self, state: PositionState, pos, pnl_pct, threshold,
+                      qty_factor, attempt_attr, done_attr, label):
+        """执行单层止盈（TP1 或 TP2），带重试冷却。"""
+        now = time.time()
+        attempt_ts = getattr(state, attempt_attr, 0.0)
+        if getattr(state, done_attr) or pnl_pct < threshold:
+            return
+        if now - attempt_ts < 60:  # 失败后冷却 60s
+            return
+        setattr(state, attempt_attr, now)
+        qty = round(pos.quantity * qty_factor, 4)
+        if qty <= 0:
+            return
+        side = "SELL" if state.direction == "LONG" else "BUY"
+        resp = self.gateway.place_order(
+            OrderRequest(symbol=state.symbol, side=side, order_type="MARKET", quantity=qty)
+        )
+        if resp.status not in ("ERROR", "REJECTED"):
+            setattr(state, done_attr, True)
+            logger.info(f"[Guardian] {label}: {state.symbol} {qty} @ ...")
+
     def _check_tp(self, state: PositionState, current_price: float):
         entry = state.entry_price
-        if state.direction == "LONG":
-            pnl_pct = (current_price - entry) / entry
-        else:
-            pnl_pct = (entry - current_price) / entry
-
+        pnl_pct = ((current_price - entry) / entry
+                    if state.direction == "LONG"
+                    else (entry - current_price) / entry)
         pos = self.portfolio.positions.get(state.symbol)
         if not pos:
             return
-
-        if not state.tp1_done and pnl_pct >= self.config.tp1_pct:
-            qty = round(pos.quantity * self.config.tp1_ratio, 4)
-            if qty > 0:
-                side = "SELL" if state.direction == "LONG" else "BUY"
-                req = OrderRequest(symbol=state.symbol, side=side, order_type="MARKET", quantity=qty)
-                resp = self.gateway.place_order(req)
-                if resp.status not in ("ERROR", "REJECTED"):
-                    state.tp1_done = True
-                    logger.info(f"[Guardian] TP1: {state.symbol} {qty} @ {current_price}")
-
-        if not state.tp2_done and pnl_pct >= self.config.tp2_pct:
-            remaining = 1 - self.config.tp1_ratio if not state.tp1_done else 1.0
-            qty = round(pos.quantity * remaining, 4)
-            if qty > 0:
-                side = "SELL" if state.direction == "LONG" else "BUY"
-                req = OrderRequest(symbol=state.symbol, side=side, order_type="MARKET", quantity=qty)
-                resp = self.gateway.place_order(req)
-                if resp.status not in ("ERROR", "REJECTED"):
-                    state.tp2_done = True
-                    logger.info(f"[Guardian] TP2: {state.symbol} {qty} @ {current_price}")
+        self._exec_tp_tier(state, pos, pnl_pct, self.config.tp1_pct,
+                           self.config.tp1_ratio, "tp1_attempt_ts", "tp1_done", "TP1")
+        remaining = 1 - self.config.tp1_ratio if not state.tp1_done else 1.0
+        self._exec_tp_tier(state, pos, pnl_pct, self.config.tp2_pct,
+                           remaining, "tp2_attempt_ts", "tp2_done", "TP2")
 
     # ─── 主检查循环 ───
 
@@ -168,17 +171,11 @@ class PositionGuardian:
             current_price = self.feed.get_last_price(symbol)
             if current_price is None:
                 continue
-
             state = self._position_state.get(symbol)
             if state is None:
                 self._init_position(symbol, pos.direction, pos.entry_price)
-                state = self._position_state.get(symbol)
-                if state is None:
-                    continue
-
-            # ATR 只在有足够K线数据时更新，否则沿用缓存
-            if len(self.feed.buffer.get_klines(symbol, "4h", limit=2)) >= 2:
-                self._atr_cache[symbol] = self._calc_atr(symbol)
+                state = self._position_state[symbol]
+            self._ensure_atr(symbol)
             self._check_trailing(state, current_price)
             self._check_tp(state, current_price)
 
@@ -200,8 +197,8 @@ class PositionGuardian:
         while self._running and not self._stop.is_set():
             try:
                 self._check_positions()
-            except Exception as e:
-                logger.error(f"Guardian error: {e}")
+            except Exception:
+                logger.exception("Guardian _check_positions failed")
             self._stop.wait(timeout=self.config.check_interval)
 
     def stop(self):

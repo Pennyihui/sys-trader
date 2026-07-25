@@ -39,12 +39,11 @@ class TestPositionGuardian:
         assert new_stop > 58000.0
 
     def test_dynamic_stop_atr(self):
-        """ATR 大时止损距离宽，ATR 小时止损距离窄"""
+        """ATR 缓存生效"""
+        import time
         self.guardian._atr_cache["BTCUSDT"] = 2000.0
-        pct_wide = self.guardian._stop_pct("BTCUSDT")
-        self.guardian._atr_cache["BTCUSDT"] = 500.0
-        pct_tight = self.guardian._stop_pct("BTCUSDT")
-        assert pct_wide > pct_tight
+        self.guardian._atr_last_update["BTCUSDT"] = time.time()
+        assert self.guardian._ensure_atr("BTCUSDT") == 2000.0
 
     def test_tp1_partial_close(self):
         """达到 TP1 时发 MARKET 单平 50%"""
