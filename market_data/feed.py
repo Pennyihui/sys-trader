@@ -34,6 +34,7 @@ class MarketDataFeed:
             lambda symbol, timeframe, ohlcv: None
         )
         self._mark_prices: Dict[str, float] = {}
+        self._last_prices: Dict[str, float] = {}
         self._running = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -57,6 +58,7 @@ class MarketDataFeed:
                 f"{s}@kline_1d",
                 f"{s}@kline_1w",
                 f"{s}@markPrice@1s",
+                f"{s}@aggTrade",
             ])
         return base + "/".join(streams)
 
@@ -89,6 +91,8 @@ class MarketDataFeed:
             self._on_kline_message(inner)
         elif event == "markPriceUpdate":
             self._on_mark_price_message(inner)
+        elif event == "aggTrade":
+            self._on_agg_trade_message(inner)
 
     def _on_kline_message(self, msg: dict):
         """处理 Kline 事件 → 写入 buffer → 检测闭合 → 触发回调。"""
@@ -122,9 +126,19 @@ class MarketDataFeed:
         price = float(msg.get("p", 0))
         self._mark_prices[symbol] = price
 
+    def _on_agg_trade_message(self, msg: dict):
+        """处理实时成交价更新（每笔交易推送）。"""
+        symbol = msg.get("s", "").upper()
+        price = float(msg.get("p", 0))
+        self._last_prices[symbol] = price
+
     def get_mark_price(self, symbol: str) -> Optional[float]:
-        """获取某标的的最新标记价格。"""
+        """获取某标的的最新标记价格（用于风控/清算判断）。"""
         return self._mark_prices.get(symbol.upper())
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        """获取某标的的最新实时成交价。"""
+        return self._last_prices.get(symbol.upper())
 
     # ─── 生命周期 ───
 
