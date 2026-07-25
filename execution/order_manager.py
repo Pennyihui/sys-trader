@@ -1,13 +1,19 @@
 """OrderManager -- order lifecycle: submit, retry, timeout, partial fill."""
 
+import math
 import time
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
-from execution.order_gateway import OrderGateway, OrderRequest, OrderResponse
+from execution.order_gateway import OrderGateway, OrderRequest, OrderResponse, AlgoOrderRequest, AlgoOrderResponse
 
 logger = logging.getLogger(__name__)
+
+
+def round_price(price: float, tick_size: float = 0.10) -> float:
+    """将价格对齐到交易所的 tick size (BTCUSDT: 0.10)"""
+    return round(math.floor(price / tick_size) * tick_size, 2)
 
 
 class OrderState(str, Enum):
@@ -69,6 +75,21 @@ class OrderManager:
             error=last_error or "Max retries exceeded",
         )
 
+    def _place_algo_with_retry(self, req: AlgoOrderRequest) -> AlgoOrderResponse:
+        """Algo Order API 重试封装，与 _place_with_retry 同一模式。"""
+        last_error = None
+        for attempt in range(self.max_retries):
+            resp = self.gateway.place_algo_order(req)
+            if resp.status != "ERROR":
+                return resp
+            last_error = resp.error
+            time.sleep(self.retry_backoff_base * (2**attempt))
+        return AlgoOrderResponse(
+            algo_id=0, symbol=req.symbol,
+            side=req.side, status="ERROR",
+            error=last_error or "Max retries exceeded",
+        )
+
     def submit_entry(
         self,
         symbol: str,
@@ -112,30 +133,22 @@ class OrderManager:
         quantity: float,
         stop_price: float,
     ) -> ManagedOrder:
+        """通过 Algo Order API 下达止损条件单。"""
         side = "SELL" if direction == "LONG" else "BUY"
-        req = OrderRequest(
-            symbol=symbol,
-            side=side,
+        req = AlgoOrderRequest(
+            symbol=symbol, side=side,
             order_type="STOP_MARKET",
             quantity=quantity,
-            stop_price=stop_price,
+            trigger_price=round_price(stop_price),
             reduce_only=True,
         )
-        resp = self._place_with_retry(req)
-        state = (
-            OrderState.REJECTED
-            if resp.status in ("REJECTED", "ERROR")
-            else OrderState.PENDING
-        )
+        resp = self._place_algo_with_retry(req)
+        state = OrderState.REJECTED if resp.status in ("REJECTED", "ERROR") else OrderState.PENDING
         order = ManagedOrder(
-            order_id=resp.order_id,
-            symbol=symbol,
-            side=side,
-            order_type="STOP_MARKET",
-            quantity=quantity,
-            price=stop_price,
-            state=state,
-            error=resp.error or "",
+            order_id=resp.algo_id or 0,
+            symbol=symbol, side=side, order_type="STOP_MARKET",
+            quantity=quantity, price=stop_price,
+            state=state, error=resp.error or "",
         )
         self._orders.append(order)
         return order
@@ -147,30 +160,22 @@ class OrderManager:
         quantity: float,
         tp_price: float,
     ) -> ManagedOrder:
+        """通过 Algo Order API 下达止盈条件单。"""
         side = "SELL" if direction == "LONG" else "BUY"
-        req = OrderRequest(
-            symbol=symbol,
-            side=side,
+        req = AlgoOrderRequest(
+            symbol=symbol, side=side,
             order_type="TAKE_PROFIT_MARKET",
             quantity=quantity,
-            stop_price=tp_price,
+            trigger_price=round_price(tp_price),
             reduce_only=True,
         )
-        resp = self._place_with_retry(req)
-        state = (
-            OrderState.REJECTED
-            if resp.status in ("REJECTED", "ERROR")
-            else OrderState.PENDING
-        )
+        resp = self._place_algo_with_retry(req)
+        state = OrderState.REJECTED if resp.status in ("REJECTED", "ERROR") else OrderState.PENDING
         order = ManagedOrder(
-            order_id=resp.order_id,
-            symbol=symbol,
-            side=side,
-            order_type="TAKE_PROFIT_MARKET",
-            quantity=quantity,
-            price=tp_price,
-            state=state,
-            error=resp.error or "",
+            order_id=resp.algo_id or 0,
+            symbol=symbol, side=side, order_type="TAKE_PROFIT_MARKET",
+            quantity=quantity, price=tp_price,
+            state=state, error=resp.error or "",
         )
         self._orders.append(order)
         return order

@@ -44,6 +44,7 @@ class PositionState:
     tp2_done: bool = False
     tp1_attempt_ts: float = 0.0
     tp2_attempt_ts: float = 0.0
+    closed_qty: float = 0.0  # 通过部分止盈已平仓的数量
 
 
 class PositionGuardian:
@@ -130,16 +131,19 @@ class PositionGuardian:
     # ─── 部分止盈 ───
 
     def _exec_tp_tier(self, state: PositionState, pos, pnl_pct, threshold,
-                      qty_factor, attempt_attr, done_attr, label):
-        """执行单层止盈（TP1 或 TP2），带重试冷却。"""
+                      attempt_attr, done_attr, label):
+        """执行单层止盈，基于 closed_qty 跟踪已平仓量避免超卖。"""
         now = time.time()
         attempt_ts = getattr(state, attempt_attr, 0.0)
         if getattr(state, done_attr) or pnl_pct < threshold:
             return
-        if now - attempt_ts < 60:  # 失败后冷却 60s
+        if now - attempt_ts < 60:
             return
         setattr(state, attempt_attr, now)
-        qty = round(pos.quantity * qty_factor, 4)
+        remaining = pos.quantity - state.closed_qty
+        if remaining <= 0:
+            return
+        qty = round(remaining, 4)
         if qty <= 0:
             return
         side = "SELL" if state.direction == "LONG" else "BUY"
@@ -147,22 +151,22 @@ class PositionGuardian:
             OrderRequest(symbol=state.symbol, side=side, order_type="MARKET", quantity=qty)
         )
         if resp.status not in ("ERROR", "REJECTED"):
-            setattr(state, done_attr, True)
+            state.closed_qty += qty
+            if state.closed_qty >= pos.quantity - 0.0001:
+                setattr(state, done_attr, True)
             logger.info(f"[Guardian] {label}: {state.symbol} {qty} @ ...")
 
     def _check_tp(self, state: PositionState, current_price: float):
-        entry = state.entry_price
-        pnl_pct = ((current_price - entry) / entry
+        pnl_pct = ((current_price - state.entry_price) / state.entry_price
                     if state.direction == "LONG"
-                    else (entry - current_price) / entry)
+                    else (state.entry_price - current_price) / state.entry_price)
         pos = self.portfolio.positions.get(state.symbol)
         if not pos:
             return
         self._exec_tp_tier(state, pos, pnl_pct, self.config.tp1_pct,
-                           self.config.tp1_ratio, "tp1_attempt_ts", "tp1_done", "TP1")
-        remaining = 1 - self.config.tp1_ratio if not state.tp1_done else 1.0
+                           "tp1_attempt_ts", "tp1_done", "TP1")
         self._exec_tp_tier(state, pos, pnl_pct, self.config.tp2_pct,
-                           remaining, "tp2_attempt_ts", "tp2_done", "TP2")
+                           "tp2_attempt_ts", "tp2_done", "TP2")
 
     # ─── 主检查循环 ───
 
