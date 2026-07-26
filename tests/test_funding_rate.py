@@ -2,6 +2,7 @@ import pytest
 from shared.funding_rate import FundingRateTracker
 
 
+@pytest.mark.unit
 class TestFundingRateTracker:
     def setup_method(self):
         self.tracker = FundingRateTracker()

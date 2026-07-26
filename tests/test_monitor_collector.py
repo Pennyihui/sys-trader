@@ -3,6 +3,7 @@ import threading
 from monitor.collector import MetricsCollector
 
 
+@pytest.mark.unit
 class TestMetricsCollector:
     def setup_method(self):
         MetricsCollector.reset()

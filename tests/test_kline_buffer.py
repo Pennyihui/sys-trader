@@ -2,6 +2,7 @@ import pytest
 from market_data.kline_buffer import KlineBuffer, Kline
 
 
+@pytest.mark.unit
 class TestKlineBuffer:
     def setup_method(self):
         self.buffer = KlineBuffer(max_size=100)

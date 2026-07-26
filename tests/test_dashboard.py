@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from dashboard.data_collector import DataCollector
 
 
+@pytest.mark.integration
 class TestDataCollector:
     def setup_method(self):
         self.feed = MagicMock()

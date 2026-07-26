@@ -2,6 +2,7 @@ import pytest
 from signal_engine.engine import SignalEngine, Signal
 
 
+@pytest.mark.unit
 class TestSignalEngine:
     def setup_method(self):
         self.engine = SignalEngine()

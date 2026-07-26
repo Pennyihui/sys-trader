@@ -4,6 +4,7 @@ import queue
 from scheduler.scheduler import Scheduler
 
 
+@pytest.mark.unit
 class TestScheduler:
     def setup_method(self):
         self.results = queue.Queue()

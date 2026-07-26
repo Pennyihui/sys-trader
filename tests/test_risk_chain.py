@@ -8,6 +8,7 @@ from signal_engine.engine import Signal
 from portfolio.tracker import PortfolioTracker, Position
 
 
+@pytest.mark.integration
 class TestRiskChain:
     def setup_method(self):
         self.tracker = PortfolioTracker(initial_equity=10000.0)

@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 from shared.event_bus import EventBus, Event
 
 
+@pytest.mark.unit
 class TestEventBus:
     def setup_method(self):
         self.bus = EventBus(redis_url="redis://localhost:6379", prefix="test")

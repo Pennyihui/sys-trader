@@ -4,6 +4,7 @@ import pytest
 from shared.config_loader import load_yaml_config, load_symbols, load_risk_config
 
 
+@pytest.mark.unit
 class TestConfigLoader:
     def test_load_yaml_config_returns_dict(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

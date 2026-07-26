@@ -5,6 +5,7 @@ from guardian.guardian import PositionGuardian, GuardianConfig, PositionState
 from portfolio.tracker import PortfolioTracker, Position
 
 
+@pytest.mark.integration
 class TestPositionGuardian:
     def setup_method(self):
         self.feed = MagicMock()

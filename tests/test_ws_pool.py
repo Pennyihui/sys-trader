@@ -2,6 +2,7 @@ import pytest
 from market_data.ws_pool import StreamSpec, build_stream_list, ConnectionPoolConfig
 
 
+@pytest.mark.unit
 class TestStreamSpec:
     def test_build_stream_list_for_single_symbol(self):
         specs = build_stream_list(["BTCUSDT"])
@@ -30,6 +31,7 @@ class TestStreamSpec:
             assert s.stream_name == s.stream_name.lower()
 
 
+@pytest.mark.unit
 class TestConnectionPoolConfig:
     def test_pool_size_bounded_by_max(self):
         symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "ARBUSDT"]

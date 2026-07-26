@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch, call
 from market_data.feed import MarketDataFeed
 
 
+@pytest.mark.integration
 class TestFeedConnectionLifecycle:
     """4 连接冗余架构的启停、切换、竞态测试"""
 
@@ -97,6 +98,7 @@ class TestFeedConnectionLifecycle:
         assert len(errors) == 0
 
 
+@pytest.mark.integration
 class TestFeedFailover:
     """故障转移场景测试"""
 
@@ -140,6 +142,7 @@ class TestFeedFailover:
         self.feed._on_conn_close(0, None, "")  # 不应 IndexError
 
 
+@pytest.mark.integration
 class TestFeedStopRace:
     """stop() 时的竞态测试"""
 

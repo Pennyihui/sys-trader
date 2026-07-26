@@ -4,6 +4,7 @@ from market_data.feed import MarketDataFeed
 from market_data.kline_buffer import Kline
 
 
+@pytest.mark.integration
 class TestMarketDataFeed:
     def setup_method(self):
         self.feed = MarketDataFeed(symbols=["BTCUSDT"], testnet=True)

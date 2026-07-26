@@ -2,6 +2,7 @@ import pytest
 from portfolio.tracker import PortfolioTracker, Position
 
 
+@pytest.mark.unit
 class TestPortfolioTracker:
     def setup_method(self):
         self.tracker = PortfolioTracker(initial_equity=10000.0)

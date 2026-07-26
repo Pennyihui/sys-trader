@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 from monitor.alerter import Alerter, AlertLevel, Alert
 
 
+@pytest.mark.unit
 class TestAlerter:
     def setup_method(self):
         self.alerts = []

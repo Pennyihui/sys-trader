@@ -74,6 +74,7 @@ def db():
 # Scenario 1: 完整交易链路
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestFullTradingPipeline:
     """模拟一次完整交易：信号→风控→下单→持仓→数据库"""
 
@@ -129,6 +130,7 @@ class TestFullTradingPipeline:
 # Scenario 2: 风控拒绝
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestRiskRejections:
     """风控应在各种条件下正确拒绝交易"""
 
@@ -164,6 +166,7 @@ class TestRiskRejections:
 # Scenario 3: Guardian 跟踪止损
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestGuardianInPipeline:
     """持仓守护者与风控协同工作"""
 
@@ -210,6 +213,7 @@ class TestGuardianInPipeline:
 # Scenario 4: 持久化
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestPersistence:
     """数据库读写验证"""
 
@@ -240,6 +244,7 @@ class TestPersistence:
 # Scenario 5: 多标的并行处理
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestMultiSymbol:
     """多个标的同时运行时互不干扰"""
 
@@ -267,6 +272,7 @@ class TestMultiSymbol:
 # Scenario 6: 异常恢复
 # ═══════════════════════════════════════════════
 
+@pytest.mark.integration
 class TestErrorRecovery:
     """价格中断、网络错误等异常情况"""
 

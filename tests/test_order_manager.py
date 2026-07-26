@@ -4,6 +4,7 @@ from execution.order_manager import OrderManager, OrderState, ManagedOrder
 from execution.order_gateway import OrderRequest, OrderResponse, AlgoOrderResponse
 
 
+@pytest.mark.integration
 class TestOrderManager:
     def setup_method(self):
         self.gateway = MagicMock()

@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 from execution.order_gateway import OrderGateway, OrderRequest, OrderResponse
 
 
+@pytest.mark.integration
 class TestOrderGateway:
     def setup_method(self):
         os.environ["BINANCE_API_KEY"] = "test_key"

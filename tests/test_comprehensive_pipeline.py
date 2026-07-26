@@ -49,6 +49,7 @@ def risk_chain():
     return chain
 
 
+@pytest.mark.integration
 class TestCompletePipeline:
     """从 K 线数据到持仓的完整端到端流程"""
 

@@ -2,6 +2,7 @@ import pytest
 from shared.database import TradeDatabase, TradeRecord
 
 
+@pytest.mark.unit
 class TestTradeDatabase:
     def setup_method(self):
         self.db = TradeDatabase(":memory:")

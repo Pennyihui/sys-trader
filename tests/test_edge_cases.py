@@ -10,6 +10,7 @@ from risk.daily_loss_limit import DailyLossLimit
 from signal_engine.engine import Signal
 
 
+@pytest.mark.integration
 class TestGuardianEdgeCases:
     def setup_method(self):
         self.feed = MagicMock()
@@ -54,6 +55,7 @@ class TestGuardianEdgeCases:
             assert qty <= 0.05, f"TP2 超卖: {qty} > 0.05"
 
 
+@pytest.mark.integration
 class TestRiskEdgeCases:
     def test_zero_equity_rejected(self):
         """权益为 0 时拒绝所有交易"""

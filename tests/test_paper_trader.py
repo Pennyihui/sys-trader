@@ -4,6 +4,7 @@ from shared.paper_trader import PaperTrader, PaperFill
 from execution.order_gateway import OrderRequest
 
 
+@pytest.mark.unit
 class TestPaperTrader:
     def setup_method(self):
         self.feed = MagicMock()
