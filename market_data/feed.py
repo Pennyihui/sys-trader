@@ -158,11 +158,13 @@ class MarketDataFeed:
     # ─── 连接状态回调 ───
 
     def _on_conn_open(self, conn_id: int):
-        self._conns[conn_id].connected = True
+        if conn_id < len(self._conns):
+            self._conns[conn_id].connected = True
         logger.info("Conn %d open (primary=%s)", conn_id, conn_id == self._primary_idx)
 
     def _on_conn_close(self, conn_id: int, status, msg: str):
-        self._conns[conn_id].connected = False
+        if conn_id < len(self._conns):
+            self._conns[conn_id].connected = False
         logger.info("Conn %d closed (%s): %s", conn_id, status, msg)
 
     def _on_conn_error(self, conn_id: int, error):
@@ -246,7 +248,6 @@ class MarketDataFeed:
                     on_open=lambda ws: self._on_conn_open(conn_id),
                 )
                 state.ws = ws
-                state.connected = False
                 ws.run_forever(
                     http_proxy_host=self.proxy_host,
                     http_proxy_port=self.proxy_port,
