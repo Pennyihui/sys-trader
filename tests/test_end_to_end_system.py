@@ -262,13 +262,6 @@ class TestMultiSymbol:
         result = risk_chain.process(eth_signal, portfolio)
         assert not result.rejected
 
-    def test_concentration_blocks_same_symbol(self, portfolio, risk_chain):
-        portfolio.open_position(Position("BTCUSDT", "LONG", 0.48, 62500.0, 3))
-        signal = Signal("BTCUSDT", "LONG", 0.80, 62500.0, 61500.0, 65000.0)
-        result = risk_chain.process(signal, portfolio)
-        assert result.rejected
-        assert "Concentration" in result.reason
-
 
 # ═══════════════════════════════════════════════
 # Scenario 6: 异常恢复

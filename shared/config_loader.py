@@ -3,8 +3,31 @@
 import os
 from dataclasses import dataclass
 from typing import List
+from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
+
+
+def load_env(env_path: str = "config/.env") -> None:
+    """加载 .env 文件到环境变量。
+
+    .env 文件中存放敏感密钥（API Key、Secret 等），
+    不提交到 git，仅供本地使用。
+
+    用法:
+        from shared.config_loader import load_env
+        load_env()  # 加载 config/.env
+    """
+    path = Path(env_path)
+    if path.exists():
+        load_dotenv(path, override=False)
+    else:
+        import warnings
+        warnings.warn(
+            f".env 文件不存在: {path.resolve()}"
+            f"\n请复制 {path.parent / '.env.example'} 为 {path} 并填入你的密钥"
+        )
 
 
 def load_yaml_config(path: str) -> dict:

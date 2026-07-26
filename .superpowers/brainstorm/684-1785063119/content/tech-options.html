@@ -1,0 +1,57 @@
+<h2>选择监控面板的技术方案</h2>
+<p class="subtitle">三种方案，各有取舍</p>
+
+<div class="options" style="display:grid;grid-template-columns:1fr;gap:1rem;">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)" style="margin-bottom:0">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Flask + Jinja2 + Chart.js</h3>
+      <p>纯 Python 后端，HTML 模板渲染，Chart.js 做图表</p>
+      <div style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+        <span class="label">轻量</span>
+        <span class="label">已有依赖</span>
+        <span class="label">服务端渲染</span>
+      </div>
+      <div class="pros-cons" style="margin-top:0.5rem">
+        <div class="pros"><small>+ 最轻量，依赖少<br>+ 与现有代码同语言<br>+ Flask 自带开发服务器</small></div>
+        <div class="cons"><small>− 页面需刷新才更新<br>− 实时数据需 SSE/WS 桥接</small></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)" style="margin-bottom:0">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Flask + HTMX + Chart.js</h3>
+      <p>以 HTMX 替代 Jinja2，局部刷新，无需写 JS</p>
+      <div style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+        <span class="label">局部刷新</span>
+        <span class="label">零 JS 代码</span>
+        <span class="label">推荐</span>
+      </div>
+      <div class="pros-cons" style="margin-top:0.5rem">
+        <div class="pros"><small>+ 自动局部更新<br>+ 无需手写 AJAX/WS<br>+ 交互流畅</small></div>
+        <div class="cons"><small>− 多一个前端依赖<br>− 复杂交互有限制</small></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)" style="margin-bottom:0">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>FastAPI + WebSocket + React</h3>
+      <p>前后端分离，WebSocket 推送实时数据</p>
+      <div style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+        <span class="label">全功能</span>
+        <span class="label">实时推送</span>
+        <span class="label">重</span>
+      </div>
+      <div class="pros-cons" style="margin-top:0.5rem">
+        <div class="pros"><small>+ WebSocket 原生推送<br>+ 前端能力最强<br>+ 图表库自由选择</small></div>
+        <div class="cons"><small>− 需要装 Node.js/npm<br>− 前后端分离复杂度<br>− 过度设计（低频交易）</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p style="margin-top:1.5rem;color:var(--muted)">点选你倾向的方案，然后告诉我你的想法。</p>

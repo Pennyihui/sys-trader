@@ -69,3 +69,22 @@ class DashboardServer:
 
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         uvicorn.run(self.app, host=host, port=port)
+
+
+def create_app(data_collector: Optional[DataCollector] = None) -> FastAPI:
+    """工厂函数：创建 DashboardServer 实例并返回 FastAPI app。
+
+    未提供 data_collector 时创建空实例供测试/开发使用。
+    """
+    if data_collector is None:
+        from portfolio.tracker import PortfolioTracker
+        from market_data.feed import MarketDataFeed
+        feed = MarketDataFeed(symbols=[], proxy_host="127.0.0.1", proxy_port=7897)
+        collector = DataCollector(feed=feed, portfolio=PortfolioTracker())
+    else:
+        collector = data_collector
+    return DashboardServer(data_collector=collector).app
+
+
+# uvicorn 入口 (python -m uvicorn dashboard.server:app)
+app = create_app()
