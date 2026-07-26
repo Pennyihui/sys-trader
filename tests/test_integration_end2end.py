@@ -39,6 +39,7 @@ def round_qty(qty: float, step_size: float = 0.001) -> float:
     return round(math.floor(qty / step_size) * step_size, 4)
 
 
+@pytest.mark.e2e
 class TestEndToEnd:
 
     @classmethod
