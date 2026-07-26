@@ -1,0 +1,71 @@
+"""FastAPI WebSocket 服务 — 实时推送交易系统数据到 Dashboard。"""
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import Optional, Set
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from dashboard.data_collector import DataCollector
+
+logger = logging.getLogger(__name__)
+
+
+class DashboardServer:
+    def __init__(self, data_collector: DataCollector, push_interval: float = 1.0):
+        self.collector = data_collector
+        self.push_interval = push_interval
+        self._app: Optional[FastAPI] = None
+        self._clients: Set[WebSocket] = set()
+
+    def _create_app(self) -> FastAPI:
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            task = asyncio.create_task(self._broadcast_loop())
+            yield
+            task.cancel()
+
+        app = FastAPI(lifespan=lifespan)
+
+        @app.websocket("/ws")
+        async def websocket_endpoint(ws: WebSocket):
+            await ws.accept()
+            self._clients.add(ws)
+            try:
+                while True:
+                    msg = await ws.receive_text()
+                    if msg in ("pause", "resume", "emergency_stop"):
+                        logger.info("[Dashboard] command: %s", msg)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                self._clients.discard(ws)
+
+        @app.get("/health")
+        async def health():
+            return {"status": "ok", "clients": len(self._clients)}
+
+        return app
+
+    async def _broadcast_loop(self):
+        while True:
+            await asyncio.sleep(self.push_interval)
+            data = self.collector.collect()
+            dead: Set[WebSocket] = set()
+            for ws in self._clients:
+                try:
+                    await ws.send_json(data)
+                except Exception:
+                    dead.add(ws)
+            self._clients -= dead
+
+    @property
+    def app(self) -> FastAPI:
+        if self._app is None:
+            self._app = self._create_app()
+        return self._app
+
+    def run(self, host: str = "0.0.0.0", port: int = 8000):
+        uvicorn.run(self.app, host=host, port=port)
