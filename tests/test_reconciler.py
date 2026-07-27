@@ -81,7 +81,7 @@ class TestReconciler:
         tracker = PortfolioTracker()
         rec = PositionReconciler(gw, tracker, interval=99999)
         rec.start()
-        assert rec._running is True
+        assert rec._stop is not None
         assert rec._thread is not None and rec._thread.is_alive()
         rec.stop()
-        assert rec._running is False
+        assert rec._stop.is_set() is True

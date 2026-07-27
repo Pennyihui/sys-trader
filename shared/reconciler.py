@@ -11,7 +11,7 @@ from portfolio.tracker import PortfolioTracker
 
 logger = logging.getLogger(__name__)
 
-_CHECK_INTERVAL = 300  # 5 分钟
+_CHECK_INTERVAL = 300
 
 
 @dataclass
@@ -22,7 +22,7 @@ class ReconcileReport:
 
 
 class PositionReconciler:
-    """运行时定期对账，发现差异告警但不自动修正。"""
+    """定期对账，发现差异告警但不自动修正。"""
 
     def __init__(self, gateway: OrderGateway, portfolio: PortfolioTracker,
                  interval: float = _CHECK_INTERVAL,
@@ -31,26 +31,23 @@ class PositionReconciler:
         self.portfolio = portfolio
         self.interval = interval
         self.on_drift = on_drift or (lambda r: None)
-        self._running = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-    def _fetch_remote(self) -> Dict[str, float]:
+    def _fetch_remote(self, cached_account: Optional[Dict] = None) -> Dict[str, float]:
         try:
-            acc = self.gateway.get_account()
+            acc = cached_account or self.gateway.get_account()
             positions = acc.get("positions", [])
-            result = {}
-            for p in positions:
-                amt = float(p.get("positionAmt", 0))
-                if abs(amt) > 0.0001:
-                    result[p["symbol"]] = amt
-            return result
+            return {
+                p["symbol"]: float(p.get("positionAmt", 0))
+                for p in positions if abs(float(p.get("positionAmt", 0))) > 0.0001
+            }
         except Exception as e:
             logger.error("Reconciler: fetch failed: %s", e)
             return {}
 
-    def reconcile(self) -> ReconcileReport:
-        remote = self._fetch_remote()
+    def reconcile(self, cached_account: Optional[Dict] = None) -> ReconcileReport:
+        remote = self._fetch_remote(cached_account)
         local = {s: p.quantity for s, p in self.portfolio.positions.items()}
         diff = {"remote_only": [], "local_only": [], "qty_mismatch": []}
         for sym, qty in remote.items():
@@ -70,19 +67,17 @@ class PositionReconciler:
         return report
 
     def start(self):
-        self._running = True
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         logger.info("Reconciler started (interval=%ds)", self.interval)
 
     def _run(self):
-        while self._running and not self._stop.is_set():
+        while not self._stop.is_set():
             self.reconcile()
             self._stop.wait(timeout=self.interval)
 
     def stop(self):
-        self._running = False
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)

@@ -1,9 +1,8 @@
-"""启动前校验 — 检查账户余额、API 权限、网络连通性。"""
+"""启动前校验 — 单次获取账户数据，多项检查。"""
 
 import logging
-import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from execution.order_gateway import OrderGateway
 
@@ -21,46 +20,34 @@ class PreflightChecker:
     def __init__(self, gateway: OrderGateway):
         self.gateway = gateway
         self.results: List[CheckResult] = []
+        self._cached_account: Optional[Dict] = None
 
-    def run_all(self) -> bool:
+    def _get_account(self) -> Optional[Dict]:
+        if self._cached_account is None:
+            try:
+                self._cached_account = self.gateway.get_account()
+            except Exception as e:
+                logger.error("Account fetch failed: %s", e)
+                return None
+        return self._cached_account
+
+    def run_all(self) -> Optional[Dict]:
+        """执行所有检查。成功返回账户数据快照，失败返回 None。"""
         self.results = []
-        self._check_account()
-        self._check_can_trade()
-        self._check_balance()
+        acc = self._get_account()
+        if acc is None:
+            for name in ("account_reachable", "can_trade", "balance_sufficient"):
+                self.results.append(CheckResult(name, False, "Account API unreachable"))
+            return None
+        if "canTrade" in acc:
+            self.results.append(CheckResult("account_reachable", True, "OK"))
+        can_trade = acc.get("canTrade", False)
+        self.results.append(CheckResult("can_trade", can_trade,
+                                        "enabled" if can_trade else "DISABLED"))
+        total = sum(float(a.get("walletBalance", 0)) for a in acc.get("assets", []))
+        enough = total > 10
+        self.results.append(CheckResult("balance_sufficient", enough, f"{total:.2f} USDT"))
         all_pass = all(r.passed for r in self.results)
         for r in self.results:
-            status = "PASS" if r.passed else "FAIL"
-            logger.info("[%s] %s: %s", status, r.name, r.message)
-        if not all_pass:
-            logger.error("Preflight checks FAILED — aborting startup")
-        return all_pass
-
-    def _check_account(self):
-        try:
-            acc = self.gateway.get_account()
-            if "canTrade" in acc:
-                self.results.append(CheckResult("account_reachable", True, "Account API reachable"))
-            else:
-                self.results.append(CheckResult("account_reachable", False, acc.get("msg", "Unknown error")))
-        except Exception as e:
-            self.results.append(CheckResult("account_reachable", False, str(e)))
-
-    def _check_can_trade(self):
-        try:
-            acc = self.gateway.get_account()
-            can_trade = acc.get("canTrade", False)
-            self.results.append(CheckResult("can_trade", can_trade,
-                                            "Trading enabled" if can_trade else "Trading DISABLED"))
-        except Exception as e:
-            self.results.append(CheckResult("can_trade", False, str(e)))
-
-    def _check_balance(self):
-        try:
-            acc = self.gateway.get_account()
-            total = sum(float(a.get("walletBalance", 0)) for a in acc.get("assets", []))
-            if total > 10:
-                self.results.append(CheckResult("balance_sufficient", True, f"Balance: {total:.2f} USDT"))
-            else:
-                self.results.append(CheckResult("balance_sufficient", False, f"Balance too low: {total:.2f} USDT"))
-        except Exception as e:
-            self.results.append(CheckResult("balance_sufficient", False, str(e)))
+            logger.info("[%s] %s: %s", "PASS" if r.passed else "FAIL", r.name, r.message)
+        return acc if all_pass else None
