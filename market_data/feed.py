@@ -198,6 +198,43 @@ class MarketDataFeed:
                 failed_idx, self.redundant_connections,
             )
 
+    # ─── 历史数据回填 ───
+
+    def backfill(self, limit: int = 100, timeframes: Optional[List[str]] = None):
+        """从 REST API 拉取历史 K 线填充 buffer。
+
+        启动时调用，确保信号引擎有足够的历史数据计算指标。
+        """
+        import requests
+
+        if timeframes is None:
+            timeframes = ["4h", "1d", "1w"]
+        base_url = "https://fapi.binance.com/fapi/v1/klines"
+        proxies = {"http": f"http://{self.proxy_host}:{self.proxy_port}",
+                   "https": f"http://{self.proxy_host}:{self.proxy_port}"}
+        for symbol in self.symbols:
+            for tf in timeframes:
+                try:
+                    resp = requests.get(
+                        base_url,
+                        params={"symbol": symbol, "interval": tf, "limit": limit},
+                        proxies=proxies, timeout=10,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    for row in data:
+                        kline = Kline(
+                            symbol=symbol, timeframe=tf,
+                            open_time=row[0], close_time=row[6],
+                            open=float(row[1]), high=float(row[2]),
+                            low=float(row[3]), close=float(row[4]),
+                            volume=float(row[5]), is_closed=True,
+                        )
+                        self.buffer.add(kline)
+                    logger.info("Backfilled %s %s: %d klines", symbol, tf, len(data))
+                except Exception as e:
+                    logger.error("Backfill failed %s %s: %s", symbol, tf, e)
+
     # ─── 生命周期 ───
 
     def start(self):
