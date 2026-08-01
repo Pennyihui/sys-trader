@@ -3,7 +3,13 @@
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import pandas as pd
+
+# 仅在类型检查时导入，避免与 interface.py 的顶层 import 形成循环依赖
+if TYPE_CHECKING:
+    from signal_engine.interface import IStrategy
 
 
 @dataclass
@@ -20,15 +26,21 @@ class Signal:
 
 
 class SignalEngine:
-    def __init__(self):
+    def __init__(self, strategy: Optional["IStrategy"] = None):
         self._weekly_cache: Dict[str, Any] = {}
         self._daily_cache: Dict[str, Any] = {}
+        self.strategy = strategy  # 可插拔策略
 
     def run(self, symbol: str, timeframe: str, ohlcv: List[dict]) -> Optional[Signal]:
         if timeframe not in ("1w", "1d", "4h"):
             return None
         if not ohlcv:
             return None
+        # 有策略且 timeframe 匹配时，走策略分析
+        if self.strategy is not None and timeframe == self.strategy.timeframe:
+            df = pd.DataFrame(ohlcv)
+            return self.strategy.analyze(symbol, df)
+        # 无策略时回退到原有逻辑
         if timeframe == "1w":
             return self._run_weekly(symbol, ohlcv)
         elif timeframe == "1d":
