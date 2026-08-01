@@ -8,6 +8,7 @@ from typing import Optional
 
 from execution.order_gateway import OrderRequest
 from market_data.feed import MarketDataFeed
+from shared.database import TradeDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,12 @@ class PaperTrader:
         feed: MarketDataFeed,
         fill_delay_ms: float = 50.0,
         slippage_pct: float = 0.01,
+        db: Optional[TradeDatabase] = None,
     ):
         self.feed = feed
         self.fill_delay_ms = fill_delay_ms
         self.slippage_pct = slippage_pct
+        self.db = db  # 可选：成交记录持久化，None 时跳过
         self._next_id = 1_000_000
         self._fills: list[PaperFill] = []
 
@@ -79,6 +82,20 @@ class PaperTrader:
         logger.info(
             "[Paper] %s %s %s @ %.2f", req.side, req.quantity, req.symbol, fill.price
         )
+
+        # 持久化成交记录（可选）
+        if self.db is not None:
+            try:
+                order_id = self.db.create_order(
+                    req.symbol, req.side, req.order_type, req.quantity, req.price or 0.0
+                )
+                self.db.update_order_status(
+                    order_id, "FILLED", str(fill.order_id),
+                    fill.executed_qty, fill.avg_price,
+                )
+            except Exception as e:
+                logger.warning("Failed to persist paper fill: %s", e)
+
         return fill
 
     def _apply_slippage(self, price: float) -> float:

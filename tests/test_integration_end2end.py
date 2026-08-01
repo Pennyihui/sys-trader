@@ -26,6 +26,7 @@ from execution.order_manager import OrderManager
 from execution.order_gateway import OrderGateway
 from portfolio.tracker import PortfolioTracker, Position
 from shared.config_loader import load_env
+from shared.execution_mode import ExecutionMode, ExecutionModeManager
 
 load_env()
 
@@ -60,7 +61,8 @@ class TestEndToEnd:
         """每个测试前重置状态"""
         self.tracker = PortfolioTracker(initial_equity=10000.0)
         self.gateway = OrderGateway(testnet=True)
-        self.orders = OrderManager(gateway=self.gateway)
+        # e2e 需要真实 testnet 下单：显式 LIVE（OrderManager 默认 DRY_RUN）
+        self.orders = OrderManager(gateway=self.gateway, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
         self.risk_chain = MiddlewareChain()
         self.risk_chain.add(PositionSizer(risk_per_trade=0.015))
         self.risk_chain.add(DrawdownBreaker(max_drawdown=0.15, consecutive_loss_breaker=3, cooldown_minutes=120))

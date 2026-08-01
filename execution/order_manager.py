@@ -5,8 +5,12 @@ import time
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List
+from typing import List, Optional
+
 from execution.order_gateway import OrderGateway, OrderRequest, OrderResponse, AlgoOrderRequest, AlgoOrderResponse
+from shared.database import TradeDatabase
+from shared.execution_mode import ExecutionMode, ExecutionModeManager
+from shared.paper_trader import PaperTrader
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ class ManagedOrder:
     avg_price: float = 0.0
     created_at: float = field(default_factory=time.time)
     error: str = ""
+    db_order_id: int = 0  # TradeDatabase orders 表主键
 
 
 class OrderManager:
@@ -49,15 +54,71 @@ class OrderManager:
         retry_backoff_base: float = 1.0,
         order_timeout: float = 60.0,
         partial_fill_wait: float = 30.0,
+        execution_mode: Optional[ExecutionModeManager] = None,
+        db: Optional[TradeDatabase] = None,
+        paper_trader: Optional[PaperTrader] = None,
     ):
         self.gateway = gateway
         self.max_retries = max_retries
         self.retry_backoff_base = retry_backoff_base
         self.order_timeout = order_timeout
         self.partial_fill_wait = partial_fill_wait
+        # 默认 DRY_RUN：未显式指定模式时不产生真实订单
+        self.execution_mode = execution_mode or ExecutionModeManager()
+        self.db = db  # 可选：订单生命周期持久化，None 时跳过
+        self.paper_trader = paper_trader  # PAPER 模式所需，None 且处于 PAPER 模式时抛错
         self._orders: List[ManagedOrder] = []
 
+    # ─── 执行模式路由 ───
+
+    def _place_paper(self, req: OrderRequest) -> OrderResponse:
+        """PAPER 模式：通过 PaperTrader 模拟成交。"""
+        if self.paper_trader is None:
+            raise RuntimeError("PAPER 模式需要传入 paper_trader 实例")
+        fill = self.paper_trader.execute(req)
+        return OrderResponse(
+            order_id=fill.order_id,
+            symbol=fill.symbol,
+            side=fill.side,
+            status=fill.status,
+            executed_qty=fill.executed_qty,
+            avg_price=fill.avg_price,
+        )
+
+    # ─── 订单生命周期持久化 ───
+
+    def _persist_submit(self, req) -> int:
+        """记录订单创建（CREATED）到 TradeDatabase，返回 db order id。"""
+        if self.db is None:
+            return 0
+        price = getattr(req, "price", None) or getattr(req, "trigger_price", None) or 0.0
+        return self.db.create_order(req.symbol, req.side, req.order_type, req.quantity, price)
+
+    def _persist_result(self, db_order_id: int, status: str, exchange_order_id: str,
+                        filled_qty: float = 0.0, avg_price: float = 0.0, error: str = ""):
+        """记录订单状态变更（submitted/filled/rejected）到 TradeDatabase。"""
+        if self.db is None or not db_order_id:
+            return
+        self.db.update_order_status(
+            db_order_id, status or "ERROR", exchange_order_id,
+            filled_qty, avg_price, 0.0, error,
+        )
+
     def _place_with_retry(self, req: OrderRequest) -> OrderResponse:
+        mode = self.execution_mode.mode
+        if mode == ExecutionMode.DRY_RUN:
+            # 只读模式：模拟 NEW 状态，不调用交易所
+            return OrderResponse(
+                order_id=0,
+                symbol=req.symbol,
+                side=req.side,
+                status="NEW",
+                executed_qty=0.0,
+                avg_price=0.0,
+            )
+        if mode == ExecutionMode.PAPER:
+            return self._place_paper(req)
+        # LIVE：当前行为，走真实 gateway
         last_error = None
         for attempt in range(self.max_retries):
             resp = self.gateway.place_order(req)
@@ -77,6 +138,27 @@ class OrderManager:
 
     def _place_algo_with_retry(self, req: AlgoOrderRequest) -> AlgoOrderResponse:
         """Algo Order API 重试封装，与 _place_with_retry 同一模式。"""
+        mode = self.execution_mode.mode
+        if mode == ExecutionMode.DRY_RUN:
+            # 只读模式：模拟 NEW 状态，不调用交易所
+            return AlgoOrderResponse(
+                algo_id=0, symbol=req.symbol, side=req.side, status="NEW"
+            )
+        if mode == ExecutionMode.PAPER:
+            if self.paper_trader is None:
+                raise RuntimeError("PAPER 模式需要传入 paper_trader 实例")
+            fill = self.paper_trader.execute(
+                OrderRequest(
+                    symbol=req.symbol, side=req.side, order_type=req.order_type,
+                    quantity=req.quantity, stop_price=req.trigger_price,
+                    reduce_only=req.reduce_only,
+                )
+            )
+            return AlgoOrderResponse(
+                algo_id=fill.order_id, symbol=req.symbol,
+                side=req.side, status=fill.status,
+            )
+        # LIVE：当前行为，走真实 gateway
         last_error = None
         for attempt in range(self.max_retries):
             resp = self.gateway.place_algo_order(req)
@@ -107,6 +189,7 @@ class OrderManager:
             quantity=quantity,
             price=entry_price,
         )
+        db_order_id = self._persist_submit(req)
         resp = self._place_with_retry(req)
         state = (
             OrderState.REJECTED
@@ -122,8 +205,14 @@ class OrderManager:
             price=entry_price,
             state=state,
             error=resp.error or "",
+            db_order_id=db_order_id,
         )
         self._orders.append(order)
+        self._persist_result(
+            db_order_id, resp.status,
+            str(resp.order_id) if resp.order_id else "",
+            resp.executed_qty, resp.avg_price, resp.error or "",
+        )
         return order
 
     def submit_stop_loss(
@@ -142,6 +231,7 @@ class OrderManager:
             trigger_price=round_price(stop_price),
             reduce_only=True,
         )
+        db_order_id = self._persist_submit(req)
         resp = self._place_algo_with_retry(req)
         state = OrderState.REJECTED if resp.status in ("REJECTED", "ERROR") else OrderState.PENDING
         order = ManagedOrder(
@@ -149,8 +239,14 @@ class OrderManager:
             symbol=symbol, side=side, order_type="STOP_MARKET",
             quantity=quantity, price=stop_price,
             state=state, error=resp.error or "",
+            db_order_id=db_order_id,
         )
         self._orders.append(order)
+        self._persist_result(
+            db_order_id, resp.status,
+            str(resp.algo_id) if resp.algo_id else "",
+            error=resp.error or "",
+        )
         return order
 
     def submit_take_profit(
@@ -169,6 +265,7 @@ class OrderManager:
             trigger_price=round_price(tp_price),
             reduce_only=True,
         )
+        db_order_id = self._persist_submit(req)
         resp = self._place_algo_with_retry(req)
         state = OrderState.REJECTED if resp.status in ("REJECTED", "ERROR") else OrderState.PENDING
         order = ManagedOrder(
@@ -176,8 +273,14 @@ class OrderManager:
             symbol=symbol, side=side, order_type="TAKE_PROFIT_MARKET",
             quantity=quantity, price=tp_price,
             state=state, error=resp.error or "",
+            db_order_id=db_order_id,
         )
         self._orders.append(order)
+        self._persist_result(
+            db_order_id, resp.status,
+            str(resp.algo_id) if resp.algo_id else "",
+            error=resp.error or "",
+        )
         return order
 
     def execute_signal(

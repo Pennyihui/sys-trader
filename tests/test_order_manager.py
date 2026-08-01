@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from execution.order_manager import OrderManager, OrderState, ManagedOrder
 from execution.order_gateway import OrderRequest, OrderResponse, AlgoOrderResponse
+from shared.execution_mode import ExecutionMode, ExecutionModeManager
 
 
 @pytest.mark.integration
@@ -10,7 +11,8 @@ class TestOrderManager:
         self.gateway = MagicMock()
         self.gateway.place_order.return_value = OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0)
         self.gateway.place_algo_order.return_value = AlgoOrderResponse(algo_id=100, symbol="BTCUSDT", side="SELL", status="NEW")
-        self.manager = OrderManager(gateway=self.gateway)
+        # 显式 LIVE：这些用例验证 gateway 调用，OrderManager 默认 DRY_RUN 不触达交易所
+        self.manager = OrderManager(gateway=self.gateway, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
 
     def test_submit_limit_order_creates_entry(self):
         self.gateway.place_order.return_value = OrderResponse(order_id=42, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0)

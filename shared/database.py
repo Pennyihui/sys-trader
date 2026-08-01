@@ -64,6 +64,21 @@ class TradeDatabase:
                 error TEXT DEFAULT '',
                 created_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                price REAL NOT NULL,
+                status TEXT DEFAULT 'CREATED',
+                exchange_order_id TEXT DEFAULT '',
+                filled_qty REAL DEFAULT 0,
+                avg_price REAL DEFAULT 0,
+                fee REAL DEFAULT 0,
+                error TEXT DEFAULT ''
+            );
         """)
         self.conn.commit()
 
@@ -119,6 +134,36 @@ class TradeDatabase:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def create_order(self, symbol, side, order_type, quantity, price=0.0) -> int:
+        """创建订单记录，返回 order id。"""
+        self.conn.execute(
+            "INSERT INTO orders (created_at, symbol, side, order_type, quantity, price) VALUES (?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), symbol, side, order_type, quantity, price),
+        )
+        self.conn.commit()
+        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def update_order_status(self, order_id, status, exchange_order_id="", filled_qty=0, avg_price=0, fee=0, error=""):
+        """更新订单状态。"""
+        self.conn.execute(
+            "UPDATE orders SET status=?, exchange_order_id=?, filled_qty=?, avg_price=?, fee=?, error=? WHERE id=?",
+            (status, exchange_order_id, filled_qty, avg_price, fee, error, order_id),
+        )
+        self.conn.commit()
+
+    def get_orders(self, limit=50) -> list[dict]:
+        """查询订单记录。"""
+        rows = self.conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_order_by_exchange_id(self, exchange_order_id) -> Optional[dict]:
+        """按交易所订单 ID 查询（用于对账）。"""
+        row = self.conn.execute(
+            "SELECT * FROM orders WHERE exchange_order_id=? ORDER BY id DESC LIMIT 1",
+            (exchange_order_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def close(self):
         self.conn.close()
