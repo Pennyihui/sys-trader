@@ -32,15 +32,13 @@ class SignalEngine:
         self.strategy = strategy  # 可插拔策略
 
     def run(self, symbol: str, timeframe: str, ohlcv: List[dict]) -> Optional[Signal]:
-        if timeframe not in ("1w", "1d", "4h"):
-            return None
         if not ohlcv:
             return None
-        # 有策略且 timeframe 匹配时，走策略分析
+        # 有策略且 timeframe 匹配时，走策略分析（支持任意策略时间框架）
         if self.strategy is not None and timeframe == self.strategy.timeframe:
             df = pd.DataFrame(ohlcv)
             return self.strategy.analyze(symbol, df)
-        # 无策略时回退到原有逻辑
+        # 无策略或 timeframe 不匹配时回退到原有逻辑
         if timeframe == "1w":
             return self._run_weekly(symbol, ohlcv)
         elif timeframe == "1d":
