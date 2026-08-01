@@ -54,6 +54,16 @@ class TradeDatabase:
                 price REAL NOT NULL,
                 metadata TEXT DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS order_intents (
+                id TEXT PRIMARY KEY,
+                symbol TEXT, side TEXT, order_type TEXT,
+                quantity REAL, price REAL,
+                client_order_id TEXT,
+                status TEXT DEFAULT 'PENDING',
+                exchange_order_id TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                created_at TEXT
+            );
         """)
         self.conn.commit()
 
@@ -81,3 +91,34 @@ class TradeDatabase:
     def get_signals(self, limit: int = 20) -> List[Dict]:
         rows = self.conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    def create_intent(self, symbol, side, order_type, quantity, price=0.0) -> dict:
+        """创建订单 intent，返回 {id, client_order_id, ...}"""
+        import uuid, time
+        intent_id = str(uuid.uuid4())
+        client_order_id = f"sys_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
+        self.conn.execute(
+            "INSERT INTO order_intents (id, symbol, side, order_type, quantity, price, client_order_id, status, exchange_order_id, error, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (intent_id, symbol, side, order_type, quantity, price, client_order_id,
+             "PENDING", "", "", datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+        return {"id": intent_id, "client_order_id": client_order_id, "status": "PENDING"}
+
+    def update_intent_status(self, intent_id, status, exchange_order_id="", error=""):
+        self.conn.execute(
+            "UPDATE order_intents SET status=?, exchange_order_id=?, error=? WHERE id=?",
+            (status, exchange_order_id, error, intent_id),
+        )
+        self.conn.commit()
+
+    def get_pending_intents(self, limit=50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM order_intents WHERE status='PENDING' OR status='SUBMITTED' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def close(self):
+        self.conn.close()

@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 
 import requests
 
+from shared.retry import retrier
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +76,7 @@ class OrderGateway:
             self.api_secret.encode(), query.encode(), hashlib.sha256
         ).hexdigest()
 
+    @retrier(max_retries=3, backoff=1.0, retry_on=(requests.exceptions.RequestException,))
     def _request(self, method: str, endpoint: str, params: dict) -> dict:
         params["timestamp"] = int(time.time() * 1000)
         params["signature"] = self._sign(params)
