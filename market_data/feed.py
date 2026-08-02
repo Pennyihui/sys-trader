@@ -75,6 +75,8 @@ class MarketDataFeed:
         for sym in self.symbols:
             s = sym.lower()
             streams.extend([
+                f"{s}@kline_15m",
+                f"{s}@kline_1h",
                 f"{s}@kline_4h",
                 f"{s}@kline_1d",
                 f"{s}@kline_1w",
@@ -87,7 +89,7 @@ class MarketDataFeed:
 
     @staticmethod
     def _timeframe_from_interval(interval: str) -> str:
-        mapping = {"1w": "1w", "1d": "1d", "4h": "4h"}
+        mapping = {"1w": "1w", "1d": "1d", "4h": "4h", "1h": "1h"}
         return mapping.get(interval, interval)
 
     @staticmethod
@@ -208,7 +210,7 @@ class MarketDataFeed:
         import requests
 
         if timeframes is None:
-            timeframes = ["4h", "1d", "1w"]
+            timeframes = ["15m", "1h", "4h", "1d", "1w"]
         base_url = "https://fapi.binance.com/fapi/v1/klines"
         proxies = {"http": f"http://{self.proxy_host}:{self.proxy_port}",
                    "https": f"http://{self.proxy_host}:{self.proxy_port}"}
