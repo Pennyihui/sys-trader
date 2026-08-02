@@ -123,7 +123,11 @@ class StabilityRunner:
             logger.warning("RISK REJECTED %s %s: %s", signal.symbol, signal.direction, result.reason)
             return
         size = result.modifications.get("position_size", 0.001)
-        qty = round(min(max(size, 0.001), 0.01), 4)  # 限制在 0.001-0.01 之间
+        # 限制名义价值在 5-100 USDT 之间（保底满足交易所最小 5 USDT 要求）
+        price = self.feed.get_last_price(signal.symbol) or signal.entry_price
+        min_qty = 5.0 / price if price else 0.001
+        max_qty = 100.0 / price if price else 0.01
+        qty = round(min(max(size, min_qty), max_qty), 4)
         side = "BUY" if signal.direction == "LONG" else "SELL"
         req = OrderRequest(symbol=signal.symbol, side=side, order_type="MARKET", quantity=qty)
         try:
