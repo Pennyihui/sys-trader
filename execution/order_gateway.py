@@ -64,11 +64,17 @@ class OrderGateway:
     BASE_URL_TESTNET = "https://testnet.binancefuture.com"
     BASE_URL_LIVE = "https://fapi.binance.com"
 
-    def __init__(self, testnet: bool = True):
+    def __init__(self, testnet: bool = True, proxy_host: str = "127.0.0.1",
+                 proxy_port: int = 7897):
         self.testnet = testnet
         self.api_key = os.environ.get("BINANCE_API_KEY", "")
         self.api_secret = os.environ.get("BINANCE_API_SECRET", "")
         self.base_url = self.BASE_URL_TESTNET if testnet else self.BASE_URL_LIVE
+        # 显式代理（与 feed.py 一致），不依赖 Windows 系统代理设置
+        self.proxies = {
+            "http": f"http://{proxy_host}:{proxy_port}",
+            "https": f"http://{proxy_host}:{proxy_port}",
+        }
 
     def _sign(self, params: dict) -> str:
         query = urlencode(params)
@@ -83,11 +89,11 @@ class OrderGateway:
         url = f"{self.base_url}{endpoint}"
         headers = {"X-MBX-APIKEY": self.api_key}
         if method == "POST":
-            resp = requests.post(url, headers=headers, data=params, timeout=10)
+            resp = requests.post(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
         elif method == "DELETE":
-            resp = requests.delete(url, headers=headers, data=params, timeout=10)
+            resp = requests.delete(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
         else:
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp = requests.get(url, headers=headers, params=params, timeout=10, proxies=self.proxies)
         return resp.json()
 
     def place_order(self, req: OrderRequest) -> OrderResponse:

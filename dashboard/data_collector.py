@@ -1,11 +1,18 @@
 """DataCollector — 从各模块聚合数据，供 Dashboard WebSocket 推送。"""
 
+import json
 import logging
-from typing import Any, Dict
+import urllib.request
+from typing import Any, Dict, Optional
 from market_data.feed import MarketDataFeed
 from portfolio.tracker import PortfolioTracker
 
 logger = logging.getLogger(__name__)
+
+# Proxy Pool Service API 地址
+PROXY_POOL_API = "http://127.0.0.1:8765"
+# Network Monitor API 地址
+NETWORK_MONITOR_API = "http://127.0.0.1:8766"
 
 
 class DataCollector:
@@ -34,6 +41,8 @@ class DataCollector:
             "position_count": len(positions),
             "positions": positions,
             "prices": self._collect_prices(),
+            "proxy_pool": self._collect_proxy_pool(),
+            "network": self._collect_network(),
         }
 
     def _collect_prices(self) -> Dict:
@@ -44,3 +53,41 @@ class DataCollector:
             if last or mark:
                 prices[symbol] = {"last": last, "mark": mark}
         return prices
+
+    def _collect_proxy_pool(self) -> Dict[str, Any]:
+        """从 Proxy Pool Service 获取代理池状态。"""
+        try:
+            req = urllib.request.Request(
+                f"{PROXY_POOL_API}/status",
+                headers={"User-Agent": "DataCollector/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            logger.debug("Proxy Pool Service 不可用: %s", e)
+            return {
+                "status": "unavailable",
+                "message": "Proxy Pool Service 未运行",
+                "total": 0,
+                "healthy": 0,
+                "unhealthy": 0,
+            }
+
+    def _collect_network(self) -> Dict[str, Any]:
+        """从 Network Monitor Service 获取网络状态。"""
+        try:
+            req = urllib.request.Request(
+                f"{NETWORK_MONITOR_API}/status",
+                headers={"User-Agent": "DataCollector/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            logger.debug("Network Monitor 不可用: %s", e)
+            return {
+                "status": "unavailable",
+                "message": "Network Monitor 未运行",
+                "latest": {},
+                "stats_1h": {},
+                "stats_24h": {},
+            }

@@ -81,7 +81,7 @@ class StabilityRunner:
         self.feed = MarketDataFeed(
             symbols=self.symbols,
             proxy_host="127.0.0.1", proxy_port=7897,
-            redundant_connections=4,
+            redundant_connections=8,
             on_kline_closed=self._on_kline_closed,
         )
         self.feed.start()
@@ -158,6 +158,7 @@ class StabilityRunner:
                 self.stats["stalls"] += 1
                 self._last_data_ts[sym] = now
                 logger.warning("STALL %s: 无数据 %ds", sym, STALE_THRESHOLD)
+                self._network_diag(reason=f"stall_{sym}")
 
     def _check_connections(self):
         if not self.feed or not self.feed._conns:
@@ -165,6 +166,76 @@ class StabilityRunner:
         connected = sum(1 for c in self.feed._conns if c.connected)
         if connected < len(self.feed._conns):
             logger.warning("WS 连接降级: %d/%d 在线", connected, len(self.feed._conns))
+            self._network_diag(reason=f"ws_downgrade_{connected}_{len(self.feed._conns)}")
+
+    def _network_diag(self, reason: str):
+        """断连/停滞时记录网络诊断，用于确凿判断根因。
+
+        诊断项:
+          1. ping 默认网关        — 本地链路是否通
+          2. ping 223.5.5.5      — 本地到互联网是否通（国内DNS）
+          3. Clash 端口 7897     — 代理进程是否活着
+          4. Clash API 8765      — 代理池服务是否活着
+
+        结果解读:
+          - 网关不通          → 本地 WiFi/网络断开（本地网络问题实锤）
+          - 网关通+223.5.5.5 不通 → 本地到互联网中断（ISP问题）
+          - 223.5.5.5 通      → 本地网络正常 → 问题在代理节点
+        """
+        import subprocess
+
+        def ping(host: str) -> str:
+            try:
+                r = subprocess.run(
+                    ["ping", "-n", "1", "-w", "2000", host],
+                    capture_output=True, text=True, timeout=5,
+                )
+                return "OK" if r.returncode == 0 else "FAIL"
+            except Exception:
+                return "ERR"
+
+        # 获取默认网关（从路由表）
+        gateway = self._get_default_gateway()
+
+        diag = {
+            "gateway_ping": ping(gateway) if gateway else "no-gateway",
+            "dns_223": ping("223.5.5.5"),
+            "clash_7897": "OPEN" if self._port_open(7897) else "CLOSED",
+            "proxy_pool_8765": "OPEN" if self._port_open(8765) else "CLOSED",
+        }
+        logger.warning(
+            "NETDIAG reason=%s | gateway=%s(%s) dns223=%s clash=%s pool=%s",
+            reason, gateway or "?", diag["gateway_ping"], diag["dns_223"],
+            diag["clash_7897"], diag["proxy_pool_8765"],
+        )
+
+    @staticmethod
+    def _get_default_gateway() -> Optional[str]:
+        """从 Windows 路由表获取默认网关。"""
+        import re
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["route", "print", "0.0.0.0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # 匹配 "0.0.0.0          0.0.0.0      192.168.1.1"
+            m = re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", r.stdout)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _port_open(port: int) -> bool:
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            s.connect(("127.0.0.1", port))
+            s.close()
+            return True
+        except Exception:
+            return False
 
     def _snapshot(self):
         elapsed = time.time() - self.stats["start_time"]

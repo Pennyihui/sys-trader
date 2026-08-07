@@ -12,6 +12,8 @@ from dashboard.data_collector import DataCollector
 
 logger = logging.getLogger(__name__)
 
+PROXY_POOL_API = "http://127.0.0.1:8765"
+
 
 class DashboardServer:
     def __init__(self, data_collector: DataCollector, push_interval: float = 1.0):
@@ -46,6 +48,20 @@ class DashboardServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self._clients)}
+
+        @app.get("/api/proxy-pool")
+        async def proxy_pool_status():
+            """返回代理池状态（透传 Proxy Pool Service）。"""
+            import json, urllib.request
+            try:
+                req = urllib.request.Request(
+                    f"{PROXY_POOL_API}/status",
+                    headers={"User-Agent": "Dashboard/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                return {"status": "unavailable", "message": str(e)}
 
         return app
 

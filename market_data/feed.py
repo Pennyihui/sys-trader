@@ -47,12 +47,15 @@ class MarketDataFeed:
         proxy_host: str = "127.0.0.1",
         proxy_port: int = 7897,
         redundant_connections: int = 4,
+        proxy_ports: Optional[List[int]] = None,
     ):
         self.symbols = symbols
         self.testnet = testnet
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
         self.redundant_connections = redundant_connections
+        # 每条连接独立端口（按订阅源隔离）；缺省时都用 proxy_port
+        self.proxy_ports = proxy_ports or [proxy_port] * redundant_connections
         self.buffer = KlineBuffer(max_size=500)
         self.on_kline_closed = on_kline_closed or (
             lambda symbol, timeframe, ohlcv: None
@@ -181,7 +184,7 @@ class MarketDataFeed:
     # ─── 主连接切换 ───
 
     def _try_switch_primary(self, failed_idx: int):
-        """主连接断开时，切换到下一个可用的备用连接。"""
+        """主连接断开时，切换到下一个可用的备用连接，并回填错过的数据。"""
         with self._lock:
             if failed_idx != self._primary_idx:
                 return  # 已经不是主连接了，忽略
@@ -287,9 +290,15 @@ class MarketDataFeed:
                     on_open=lambda ws: self._on_conn_open(conn_id),
                 )
                 state.ws = ws
+                # 每条连接走独立端口（按订阅源隔离）
+                conn_port = (
+                    self.proxy_ports[conn_id]
+                    if conn_id < len(self.proxy_ports)
+                    else self.proxy_port
+                )
                 ws.run_forever(
                     http_proxy_host=self.proxy_host,
-                    http_proxy_port=self.proxy_port,
+                    http_proxy_port=conn_port,
                     proxy_type="http",
                     ping_interval=30,
                     ping_timeout=10,

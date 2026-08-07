@@ -3,3 +3,9 @@ __pycache__/
 config/.env
 config/.env.local
 node_modules/
+
+# proxy pool: 含代理凭据的运行文件（mihomo.yaml 有全部节点密码）
+tools/proxy_pool/mihomo.yaml
+tools/proxy_pool/data/
+tools/proxy_pool/cache/
+tools/proxy_pool/logs/
