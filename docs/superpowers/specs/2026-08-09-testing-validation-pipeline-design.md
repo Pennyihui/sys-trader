@@ -19,13 +19,14 @@
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
-| 影子对齐粒度 | **信号级比对** | 低频策略（0-3 笔/天）决策对齐已足够；成交级滑点模型复杂度高、收益低，留后续 |
+| 影子模式 | **双实例并行**（LIVE + PAPER 各自独立决策） | 业界主流（polybot/ml4t/MultiCharts 实测）；单信号喂双路径对齐率恒 100% 无意义 |
+| 影子验收 | **信号对齐 ≥95% + 逐笔执行质量**（滑点 vs 到达价、填充率） | 低频系统 1 周 0-21 笔，相关性统计（≥50 笔样本才可靠）不适用，明确不做 |
 | 范围 | **A-F 全部纳入本期** | 用户拍板"除回测引擎外都完成" |
 | 与数据链路 spec 的关系 | 依赖前置 | B/E 走 EventBus 通道，需先行实现 |
 
 ## 3. A. 离线模拟（重放）
 
-**新组件 `ReplayFeed`**（market_data/ 或 tools/）：
+**新组件 `ReplayFeed`**（tools/，与 replay_runner.py 同目录——测试支撑组件，不进生产模块）：
 
 - `feed.backfill()` 拉取的历史 K 线持久化到 `data/replay/<symbol>_<tf>.json`
 - `ReplayFeed` 实现 MarketDataFeed 的接口（`get_last_price`/`get_mark_price`/`on_kline_closed` 触发），按时间戳重放：逐条触发 `on_kline_closed`，驱动**完整装配**（DRY_RUN 模式）
@@ -35,24 +36,29 @@
 
 ## 4. B. 影子交易（Shadow）
 
-### 4.1 架构
+### 4.1 架构（双实例并行）
+
+业界主流做法（[polybot](https://polybot.cryptuon.com/guides/shadow-mode/)、[ml4t-live](https://github.com/ml4t/live)、MultiCharts 实测）：两个独立实例并行，各自独立决策。**同一信号喂双路径（对齐率恒 100%）无意义**——双实例的 tick 传递延迟差异导致的小幅信号偏差是预期现象（[MultiCharts 实测](https://multicharts.com/discussion/viewtopic.php?t=49343&sid=b5398b631a54a1f0c5ce2b9ef7e8e123&view=print)）。
 
 ```
-同一信号流（EventBus signal.generated）
- ├─→ LIVE 路径：OrderManager(LIVE)，真实下单（小仓位）
- └─→ PAPER 路径：OrderManager(PAPER) + PaperTrader，同一风控参数
-      └─→ ShadowMonitor（新组件 tools/shadow_monitor.py，验证工具）
-            信号对齐率 / 成交价差 / 滑点统计，落盘 JSON 报告
+实例 A: SystemRunner(LIVE，小仓位实盘) ──┐
+                                          ├─→ EventBus（signal.generated 事件带 instance 标识）
+实例 B: SystemRunner(PAPER，同参数模拟) ──┘
+                                              └─→ ShadowMonitor（tools/shadow_monitor.py）
+                                                    双实例信号对齐率 / 逐笔滑点(成交价 vs 到达价) / 填充率
+                                                    落盘 JSON 报告
 ```
 
-- SystemRunner 支持双 OrderManager 实例（`--shadow` 开关）：同一 `signal.generated` 事件订阅者各驱动一条路径
-- PAPER 路径使用与 LIVE **完全相同的风控参数**（apples-to-apples 比对）
-- `ShadowMonitor` 统计：信号对齐率（LIVE 决策 vs PAPER 决策一致性）、成交价差、模拟 vs 实际成交时间差
+- 两个 SystemRunner 实例参数相同（`--instance` 标识），仅 execution_mode 不同：A=LIVE（小仓位）、B=PAPER（PaperTrader）
+- 同一 EventBus：`signal.generated` 事件带 instance 字段，ShadowMonitor 按 instance 分流比对
+- 风控参数完全一致（apples-to-apples）
 
-### 4.2 验收标准（对齐 GeneTrader 门槛）
+### 4.2 验收标准
 
-- 信号对齐 ≥ 95%（阈值可配置）
+- 信号对齐 ≥ 95%（双实例 tick 延迟偏差是预期的，100% 反而是异常信号）
+- 逐笔执行质量：滑点（成交价 vs 到达价）记录 + 填充率统计（TCA 风格）
 - 运行 1 周无系统性偏差
+- **明确不做**：收益/胜率/PnL 相关性统计（agent66 式 >0.7）——低频系统 1 周 0-21 笔，达不到相关性统计所需的样本量（≥50 笔才可靠）
 - **已知局限**（写进文档）：影子交易测不了市场冲击——影子通过 ≠ 可直接满仓，仍需 D 分级
 
 ## 5. C. testnet soak 7 天
@@ -99,7 +105,7 @@ command.resume → 解除熔断
 | 阶段 | 验收标准 |
 |---|---|
 | A 离线模拟 | 全量重放无异常 + RSS 平稳 |
-| B 影子交易 | 信号对齐 ≥95%，1 周无系统性偏差 |
+| B 影子交易 | 信号对齐 ≥95% + 逐笔滑点/填充率记录，1 周无系统性偏差 |
 | C testnet soak | 7 天无意外错误/熔断/漂移，内存平稳 |
 | D 实盘分级 | 每级 7 天稳定 + 指标与 testnet 一致 ±20% |
 | E kill switch | 命令触发 3 秒内停单+撤单+熔断生效（测试验证） |

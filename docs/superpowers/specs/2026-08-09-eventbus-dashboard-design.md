@@ -73,7 +73,7 @@ CLI/env：`--strategy`、`--symbols`、`--execution-mode`（dry_run/paper/live�
 |---|---|---|
 | `position.changed` | `PortfolioTracker.open/close_position/update_equity` | 持仓、权益、已实现盈亏 |
 | `order.filled` | `OrderManager.submit_*` 成交后 | 订单 id、symbol、方向、状态、均价 |
-| `signal.generated` | `SignalEngine.run` 产出 Signal | 策略、方向、symbol、价格、conviction |
+| `signal.generated` | `SignalEngine.run` 产出 Signal | 策略、方向、symbol、价格、conviction；**事件带 instance 标识**（影子交易双实例时区分，见管道 spec 4.1） |
 | `signal.approved` / `signal.rejected` | `MiddlewareChain.process` 结果处 | 通过/拒绝 + 风控原因 |
 | `heartbeat` | runner 新增 `HeartbeatPublisher` 线程（5s 周期读 MetricsCollector）；**本次一并埋点**：各模块关键循环点调用 `MetricsCollector.instance().heartbeat(module)`（feed 消息循环 / reconciler / runner 主循环）——否则 MetricsCollector 为空，dashboard 模块状态全空 | 各模块最后心跳时间 |
 | `command`（反向） | dashboard /ws 命令 → publish；SystemRunner 订阅 | `emergency_stop` / `resume` —— kill switch 接线（见测试管道 spec 第 7 节） |
@@ -88,10 +88,10 @@ CLI/env：`--strategy`、`--symbols`、`--execution-mode`（dry_run/paper/live�
 
 | 组件 | 改动 |
 |---|---|
-| `StateStore`（新，dashboard/state_store.py） | 每事件流一个消费线程（`run_consumer` 阻塞循环），维护持仓/权益/信号(≤50条)/订单/心跳副本，线程安全 |
+| `StateStore`（新，dashboard/state_store.py） | 每事件流一个消费线程（`run_consumer` 阻塞循环），维护持仓/权益/信号(≤50条)/订单/心跳副本，线程安全；**影子实例（PAPER）事件过滤，仅 LIVE 实例进入 dashboard 状态** |
 | `DataCollector` | 交易状态改读 StateStore；proxy_pool/network 保持 HTTP 透传 |
 | 行情 | 保留 dashboard 自己的 `MarketDataFeed`（symbols 从配置读），订阅 markPrice@1s —— 行情属 Market Data 职责，不走事件流 |
-| `server.py create_app` | 构造 StateStore + 启动消费线程 + 真实 symbols feed |
+| `server.py create_app` | 构造 StateStore + 启动消费线程 + 真实 symbols feed；**/ws 收到命令时 publish 到 command 事件流**（kill switch 接线，见管道 spec 7） |
 | Redis 不可用 | 页面显示 disconnected 而非崩溃 |
 
 ## 7. 部署
