@@ -36,6 +36,16 @@ class MetricsCollector:
         with self._lock:
             return self._heartbeats.get(module)
 
+    def heartbeat_ages(self) -> dict[str, float]:
+        """返回 {module: age_seconds} 快照副本（锁内读取, 取整到 0.1s）。
+
+        供 HeartbeatPublisher 等外部模块读取心跳年龄,
+        避免直接访问私有成员 _heartbeats/_lock。
+        """
+        now = time.time()
+        with self._lock:
+            return {mod: round(now - ts, 1) for mod, ts in self._heartbeats.items()}
+
     def increment(self, metric: str, amount: int = 1):
         with self._lock:
             self._counters[metric] = self._counters.get(metric, 0) + amount

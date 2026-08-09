@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+from monitor.collector import MetricsCollector
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,7 +14,12 @@ class HeartbeatPublisher:
 
     - interval: 发布周期 (秒), 默认 5s
     - instance: 实例标识 (live/paper/...), 随事件携带
-    - event_bus: 发布通道; None 时 _run_once 跳过 publish (静默)
+    - event_bus: 发布通道; None 时 _run_once 直接返回 (注入模式: 静默)
+
+    Per-module stale 超时约定 (T12 接 Alerter.check_heartbeat 时必须遵守):
+      - runner / market_data: <=15s   — 高频心跳 (主循环 5s / 行情消息 ~1s)
+      - reconciler: >=600s            — 低频对账循环, 心跳周期 300s
+    Alerter.check_heartbeat 默认 60s 超时只适用于高频模块, 低频模块需显式传参。
     """
 
     def __init__(self, event_bus, interval: float = 5.0, instance: str = "live"):
@@ -23,18 +30,17 @@ class HeartbeatPublisher:
         self._thread: threading.Thread | None = None
 
     def _run_once(self):
-        from monitor.collector import MetricsCollector
-        collector = MetricsCollector.instance()
-        modules = {}
-        with collector._lock:
-            for mod, ts in collector._heartbeats.items():
-                modules[mod] = round(time.time() - ts, 1)
-        if self.event_bus is not None:
-            self.event_bus.publish("heartbeat", {
-                "instance": self.instance, "modules": modules,
-            })
+        if self.event_bus is None:
+            return  # 无发布通道 (注入模式), 避免空转
+        modules = MetricsCollector.instance().heartbeat_ages()
+        self.event_bus.publish("heartbeat", {
+            "instance": self.instance, "modules": modules,
+        })
 
     def start(self):
+        if self._thread and self._thread.is_alive():
+            logger.warning("HeartbeatPublisher already running")
+            return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -44,8 +50,10 @@ class HeartbeatPublisher:
             try:
                 self._run_once()
             except Exception as e:
-                logger.warning("HeartbeatPublisher error: %s", e)
+                logger.warning("HeartbeatPublisher error: %s", e, exc_info=True)
             self._stop.wait(timeout=self.interval)
 
     def stop(self):
         self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)

@@ -11,6 +11,7 @@ import threading
 import logging
 from typing import Callable, Dict, List, Optional
 from market_data.kline_buffer import KlineBuffer, Kline
+from monitor.collector import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,7 @@ class MarketDataFeed:
         """消息分发：只有主连接的消息才处理（CPython 下 int 读原子安全）。"""
         if conn_id != self._primary_idx:
             return
-        # 模块心跳: 主连接有消息到达即视为 feed 存活 (局部 import 避免循环依赖)
-        from monitor.collector import MetricsCollector
+        # 模块心跳: 主连接有消息到达即视为 feed 存活
         MetricsCollector.instance().heartbeat("market_data")
         self._on_message(raw)
 

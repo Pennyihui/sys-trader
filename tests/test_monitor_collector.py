@@ -23,6 +23,13 @@ class TestMetricsCollector:
     def test_missing_heartbeat_returns_none(self):
         assert self.collector.last_heartbeat("nonexistent") is None
 
+    def test_heartbeat_ages_returns_age_seconds(self):
+        self.collector.heartbeat("x")
+        ages = self.collector.heartbeat_ages()
+        assert isinstance(ages, dict)
+        assert "x" in ages
+        assert 0 <= ages["x"] < 1.0  # 刚打过心跳, age 接近 0
+
     def test_increment_counter_adds(self):
         self.collector.increment("trades.today")
         self.collector.increment("trades.today")

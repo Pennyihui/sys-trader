@@ -41,6 +41,14 @@ class Alerter:
         return alert
 
     def check_heartbeat(self, module: str, collector: MetricsCollector, timeout_seconds: int = 60):
+        """检查模块心跳是否超时, 超时发 CRITICAL 告警。
+
+        Per-module timeout 约定 (与 shared/heartbeat_publisher.py 保持一致):
+          - runner / market_data: <=15s   — 高频心跳 (主循环 5s / 行情消息 ~1s)
+          - reconciler: >=600s            — 低频对账循环, 心跳周期 300s
+        默认 60s 只适用于高频模块; 检查 reconciler 时必须显式传 >=600s,
+        否则低频心跳会被误判为超时。
+        """
         last = collector.last_heartbeat(module)
         if last is None:
             self.fire(AlertLevel.WARNING, f"heartbeat.{module}", f"No heartbeat ever received from {module}")

@@ -159,6 +159,8 @@ class SystemRunner:
         self.feed.backfill(limit=200)
         for sym in self.symbols:
             self._last_data_ts[sym] = time.time()
+        # 模块心跳: 覆盖启动窗口 (initialize 完成即标记 runner 存活)
+        MetricsCollector.instance().heartbeat("runner")
         logger.info("System initialized")
 
     # ─── 统一装配 ───
