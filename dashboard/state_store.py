@@ -57,7 +57,7 @@ class StateStore:
         else:
             stream = getattr(event, "stream", "")
             data = getattr(event, "data", {}) or {}
-        if stream == "signal.generated" and not self._should_accept(data):
+        if stream in ("signal.generated", "signal.approved", "signal.rejected") and not self._should_accept(data):
             return
         with self._lock:
             if stream == "position.changed":

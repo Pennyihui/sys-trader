@@ -33,6 +33,16 @@ class TestStateStore:
                 "instance": "live", "symbol": "X", "direction": "LONG", "conviction": 0.5}})
         assert len(self.store.signals) == 50
 
+    def test_handle_signal_approved_filters_instance(self):
+        self.store._handle({"stream": "signal.approved", "data": {
+            "instance": "paper", "symbol": "BTCUSDT", "direction": "LONG"}})
+        assert self.store.signals == []  # 影子实例被过滤
+
+        self.store._handle({"stream": "signal.approved", "data": {
+            "instance": "live", "symbol": "BTCUSDT", "direction": "LONG"}})
+        assert len(self.store.signals) == 1
+        assert self.store.signals[0]["decision"] == "signal.approved"
+
     def test_handle_heartbeat(self):
         self.store._handle({"stream": "heartbeat", "data": {
             "modules": {"market_data": 0.2, "runner": 1.0}}})

@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 import pytest
+import redis
 from unittest.mock import patch, MagicMock
 from shared.event_bus import EventBus, Event
 
@@ -61,6 +62,28 @@ class TestEventBus:
         assert parsed["stream"] == original.stream
         assert parsed["data"]["symbol"] == "ETHUSDT"
         assert parsed["data"]["qty"] == 0.5
+
+    def test_run_consumer_creates_group(self):
+        """run_consumer 自动创建 consumer group（幂等，BUSYGROUP 容忍）。"""
+        bus = self.bus
+        with patch.object(bus.redis, "xgroup_create") as mock_create, \
+                patch.object(bus, "_poll_once"), \
+                patch.object(bus._stop, "is_set", side_effect=[False, True]):
+            bus.run_consumer("test.stream", "grp", lambda e: None)
+
+        mock_create.assert_called_once()
+        args = mock_create.call_args
+        assert args[0][0] == "test:test.stream"
+        assert args[0][1] == "grp"
+        assert args[1]["id"] == "$"
+        assert args[1]["mkstream"] is True
+
+        # BUSYGROUP 已存在时不抛异常，继续消费
+        with patch.object(bus.redis, "xgroup_create",
+                          side_effect=redis.ResponseError("BUSYGROUP Consumer group name already exists")), \
+                patch.object(bus, "_poll_once"), \
+                patch.object(bus._stop, "is_set", side_effect=[False, True]):
+            bus.run_consumer("test.stream", "grp", lambda e: None)
 
     def test_publish_survives_redis_down(self):
         """Redis 不可用时 publish 不抛异常，返回空字符串。"""
