@@ -19,9 +19,16 @@ export interface DashboardData {
   prices: Record<string, { last: number | null; mark: number | null }>;
 }
 
+export interface CommandAck {
+  command: string;
+  ok: boolean;
+  error?: string;
+}
+
 export function useWebSocket() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [connected, setConnected] = useState(false);
+  const [lastAck, setLastAck] = useState<CommandAck | null>(null);
   const ws = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -31,11 +38,19 @@ export function useWebSocket() {
     ws.current.onopen = () => setConnected(true);
     ws.current.onclose = () => setConnected(false);
     ws.current.onmessage = (e) => {
-      try { setData(JSON.parse(e.data)); } catch {}
+      try {
+        const frame = JSON.parse(e.data);
+        // command_ack 帧 (kill switch 反馈) 不进数据状态, 单独存 lastAck
+        if (frame && frame.type === 'command_ack') {
+          setLastAck({ command: frame.command, ok: !!frame.ok, error: frame.error });
+          return;
+        }
+        setData(frame);
+      } catch {}
     };
     return () => ws.current?.close();
   }, []);
 
   const send = (msg: string) => ws.current?.send(msg);
-  return { data, connected, send };
+  return { data, connected, lastAck, send };
 }

@@ -7,7 +7,7 @@ import { ModuleStatus } from './components/ModuleStatus';
 import { Controls } from './components/Controls';
 
 export default function App() {
-  const { data, connected, send } = useWebSocket();
+  const { data, connected, lastAck, send } = useWebSocket();
 
   return (
     <div className="min-h-screen bg-gray-900 p-4">
@@ -26,7 +26,7 @@ export default function App() {
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
             <ModuleStatus />
-            <Controls onCommand={send} />
+            <Controls onCommand={send} lastAck={lastAck} />
           </div>
         </>
       ) : (

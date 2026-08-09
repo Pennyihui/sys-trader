@@ -304,12 +304,28 @@ class SystemRunner:
             logger.info("Circuit breaker cleared — trading resumed")
 
     def _cancel_active_orders(self):
-        """撤销全部活跃订单（OrderManager 无撤销接口时退化为仅停止新单）。"""
+        """撤销全部活跃订单。
+
+        LIMIT 入场单 → cancel_order(symbol, orderId)
+        STOP_MARKET/TAKE_PROFIT_MARKET 条件单 → cancel_algo_order(symbol, algoId)
+        （条件单的 ManagedOrder.order_id 实为 algoId，走普通撤销会被交易所拒绝；
+          返回值不可忽略，status == "ERROR" 时告警）
+        """
         try:
             active = getattr(self.orders, "active_orders", []) or []
             for order in active:
                 if getattr(order, "state", None) and order.state.value not in ("FILLED", "CANCELED"):
-                    self.gateway.cancel_order(order.symbol, order.order_id)
+                    symbol, oid = order.symbol, order.order_id
+                    if order.order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+                        resp = self.gateway.cancel_algo_order(symbol, oid)
+                        if getattr(resp, "status", "") == "ERROR":
+                            logger.warning("Algo order cancel failed %s algoId=%s: %s",
+                                           symbol, oid, getattr(resp, "error", ""))
+                    else:
+                        resp = self.gateway.cancel_order(symbol, oid)
+                        if getattr(resp, "status", "") == "ERROR":
+                            logger.warning("Order cancel failed %s orderId=%s: %s",
+                                           symbol, oid, getattr(resp, "error", ""))
         except Exception as e:
             logger.error("Cancel active orders failed: %s", e)
 
