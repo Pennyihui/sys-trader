@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 
@@ -15,10 +16,18 @@ logger = logging.getLogger(__name__)
 PROXY_POOL_API = "http://127.0.0.1:8765"
 
 
+def handle_ws_command(event_bus, msg: str):
+    """dashboard 命令 → command 事件流（kill switch 接线）。"""
+    if event_bus is not None:
+        event_bus.publish("command", {"command": msg})
+
+
 class DashboardServer:
-    def __init__(self, data_collector: DataCollector, push_interval: float = 1.0):
+    def __init__(self, data_collector: DataCollector, push_interval: float = 1.0,
+                 event_bus=None):
         self.collector = data_collector
         self.push_interval = push_interval
+        self.event_bus = event_bus
         self._app: Optional[FastAPI] = None
         self._clients: Set[WebSocket] = set()
 
@@ -40,6 +49,7 @@ class DashboardServer:
                     msg = await ws.receive_text()
                     if msg in ("pause", "resume", "emergency_stop"):
                         logger.info("[Dashboard] command: %s", msg)
+                        handle_ws_command(self.event_bus, msg)
             except WebSocketDisconnect:
                 pass
             finally:
@@ -87,21 +97,32 @@ class DashboardServer:
         uvicorn.run(self.app, host=host, port=port)
 
 
-def create_app(data_collector: Optional[DataCollector] = None) -> FastAPI:
+def create_app(data_collector: Optional[DataCollector] = None, event_bus=None) -> FastAPI:
     """工厂函数：创建 DashboardServer 实例并返回 FastAPI app。
 
-    未提供 data_collector 时创建空实例供测试/开发使用。
+    未提供 data_collector 时自动装配：EventBus（Redis）→ StateStore（消费
+    position/order/signal/heartbeat 流）→ MarketDataFeed（Binance WS 行情），
+    供生产 uvicorn 入口使用。
     """
     if data_collector is None:
         from shared.event_bus import EventBus
         from dashboard.state_store import StateStore
         from market_data.feed import MarketDataFeed
-        feed = MarketDataFeed(symbols=[], proxy_host="127.0.0.1", proxy_port=7897)
-        store = StateStore(event_bus=EventBus(), instance_filter="live")
+        from shared.config_loader import load_env
+        load_env()
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        if event_bus is None:
+            event_bus = EventBus(redis_url=redis_url)
+        symbols = os.environ.get("DASHBOARD_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+        feed = MarketDataFeed(symbols=symbols, proxy_host="127.0.0.1", proxy_port=7897)
+        store = StateStore(event_bus=event_bus, instance_filter=os.environ.get("DASHBOARD_INSTANCE", "live"))
+        try:
+            store.start()
+        except Exception as e:
+            logger.warning("StateStore start failed (Redis down?): %s", e)
+        feed.start()
         collector = DataCollector(state_store=store, feed=feed)
-    else:
-        collector = data_collector
-    return DashboardServer(data_collector=collector).app
+    return DashboardServer(data_collector=collector, event_bus=event_bus).app
 
 
 # uvicorn 入口 (python -m uvicorn dashboard.server:app)

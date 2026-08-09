@@ -72,3 +72,19 @@ class TestDataCollector:
         assert data["signals"] == []
         assert data["orders"] == []
         assert data["heartbeats"] == {}
+
+
+@pytest.mark.unit
+class TestCreateApp:
+    def test_create_app_wires_state_store_and_feed(self, monkeypatch):
+        monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1")  # 不可达：StateStore 启动失败不崩溃
+        from dashboard.server import create_app
+        app = create_app()
+        assert app is not None
+
+    def test_websocket_command_publishes(self):
+        """dashboard 命令 → command 事件流。"""
+        from dashboard.server import handle_ws_command
+        bus = MagicMock()
+        handle_ws_command(bus, "emergency_stop")
+        bus.publish.assert_called_once_with("command", {"command": "emergency_stop"})
