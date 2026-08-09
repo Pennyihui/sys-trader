@@ -57,7 +57,7 @@ class StateStore:
         else:
             stream = getattr(event, "stream", "")
             data = getattr(event, "data", {}) or {}
-        if stream in ("signal.generated", "signal.approved", "signal.rejected") and not self._should_accept(data):
+        if not self._should_accept(data):
             return
         with self._lock:
             if stream == "position.changed":
@@ -74,6 +74,13 @@ class StateStore:
                 self.signals.append({"decision": stream, **data})
                 self.signals = self.signals[-self.max_signals:]
 
+    def _update_metrics(self, data: dict):
+        for attr, key in (("margin_ratio", "margin_ratio"),
+                          ("daily_pnl", "daily_pnl"),
+                          ("drawdown", "drawdown")):
+            if data.get(key) is not None:
+                setattr(self, attr, data[key])
+
     def _on_position(self, data: dict):
         event = data.get("event")
         if event == "open":
@@ -82,6 +89,8 @@ class StateStore:
             self.positions.pop(data["symbol"], None)
             if data.get("total_equity") is not None:
                 self.equity = data["total_equity"]
+            self._update_metrics(data)
         elif event == "equity":
             if data.get("total_equity") is not None:
                 self.equity = data["total_equity"]
+            self._update_metrics(data)

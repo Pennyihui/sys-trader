@@ -85,6 +85,20 @@ class TestEventBus:
                 patch.object(bus._stop, "is_set", side_effect=[False, True]):
             bus.run_consumer("test.stream", "grp", lambda e: None)
 
+    def test_run_consumer_retries_group_creation(self):
+        """Redis 启动不可用时建组失败不杀死线程，重试成功后继续消费。"""
+        bus = self.bus
+        with patch.object(bus.redis, "xgroup_create",
+                          side_effect=[redis.ConnectionError("Redis is down"), None]) as mock_create, \
+                patch.object(bus, "_poll_once") as mock_poll, \
+                patch.object(bus._stop, "is_set", side_effect=[False, False, True]), \
+                patch.object(bus._stop, "wait") as mock_wait:
+            bus.run_consumer("test.stream", "grp", lambda e: None)
+
+        assert mock_create.call_count == 2  # 首次 ConnectionError，重试成功
+        assert mock_poll.call_count == 1   # 建组成功后继续消费
+        assert mock_wait.call_count == 1   # 失败后短暂等待再重试
+
     def test_publish_survives_redis_down(self):
         """Redis 不可用时 publish 不抛异常，返回空字符串。"""
         bus = EventBus(redis_url="redis://127.0.0.1:1")  # 必然失败的端口

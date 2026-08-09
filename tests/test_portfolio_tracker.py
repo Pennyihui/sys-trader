@@ -76,6 +76,40 @@ def test_publishes_position_changed_on_open():
     assert stream == "position.changed"
     assert payload["symbol"] == "BTCUSDT"
     assert payload["direction"] == "LONG"
+    assert payload["instance"] == "live"
+
+
+@pytest.mark.unit
+def test_publishes_custom_instance_tag():
+    bus = MagicMock()
+    tracker = PortfolioTracker(initial_equity=1000.0, event_bus=bus, instance="paper")
+    tracker.open_position(Position("BTCUSDT", "LONG", 0.1, 64000.0, 3))
+    stream, payload = bus.publish.call_args[0]
+    assert stream == "position.changed"
+    assert payload["instance"] == "paper"
+
+
+@pytest.mark.unit
+def test_publishes_metrics_on_equity_and_close():
+    bus = MagicMock()
+    tracker = PortfolioTracker(initial_equity=10000.0, event_bus=bus)
+
+    tracker.update_equity(10500.0)
+    _, payload = bus.publish.call_args_list[0][0]
+    assert payload["event"] == "equity"
+    assert payload["instance"] == "live"
+    assert "margin_ratio" in payload
+    assert "daily_pnl" in payload
+    assert "drawdown" in payload
+
+    tracker.open_position(Position("BTCUSDT", "LONG", 0.1, 64000.0, 3))
+    tracker.close_position("BTCUSDT", 65000.0)
+    _, close_payload = bus.publish.call_args_list[-1][0]
+    assert close_payload["event"] == "close"
+    assert close_payload["instance"] == "live"
+    assert "margin_ratio" in close_payload
+    assert "daily_pnl" in close_payload
+    assert "drawdown" in close_payload
 
 
 @pytest.mark.unit

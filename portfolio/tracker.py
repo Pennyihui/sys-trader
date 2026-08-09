@@ -16,7 +16,7 @@ class Position:
 
 
 class PortfolioTracker:
-    def __init__(self, initial_equity: float = 0.0, event_bus=None):
+    def __init__(self, initial_equity: float = 0.0, event_bus=None, instance: str = "live"):
         self.total_equity: float = initial_equity
         self.available_balance: float = initial_equity
         self.peak_equity: float = initial_equity
@@ -27,11 +27,12 @@ class PortfolioTracker:
         self.consecutive_losses: int = 0
         self._last_reset_day: int = datetime.now(timezone.utc).day
         self.event_bus = event_bus  # 事件总线注入（可选，None 时静默跳过）
+        self.instance = instance  # 实例标识（live/paper），随事件发布供消费侧过滤
 
     def _publish(self, data: dict):
         """发布 position.changed 事件；未注入 event_bus 时静默跳过。"""
         if self.event_bus is not None:
-            self.event_bus.publish("position.changed", data)
+            self.event_bus.publish("position.changed", {**data, "instance": self.instance})
 
     def _maybe_reset_daily(self):
         today = datetime.now(timezone.utc).day
@@ -46,7 +47,9 @@ class PortfolioTracker:
             self.available_balance = available_balance
         if total_equity > self.peak_equity:
             self.peak_equity = total_equity
-        self._publish({"event": "equity", "total_equity": total_equity, "available_balance": self.available_balance})
+        self._publish({"event": "equity", "total_equity": total_equity, "available_balance": self.available_balance,
+                       "margin_ratio": self.margin_ratio, "daily_pnl": self.daily_realized_pnl,
+                       "drawdown": self.current_drawdown})
 
     def open_position(self, position: Position):
         self.positions[position.symbol] = position
@@ -70,7 +73,9 @@ class PortfolioTracker:
         if self.total_equity > self.peak_equity:
             self.peak_equity = self.total_equity
         self._maybe_reset_daily()
-        self._publish({"event": "close", "symbol": symbol, "exit_price": exit_price, "realized_pnl": pnl, "total_equity": self.total_equity})
+        self._publish({"event": "close", "symbol": symbol, "exit_price": exit_price, "realized_pnl": pnl,
+                       "total_equity": self.total_equity, "margin_ratio": self.margin_ratio,
+                       "daily_pnl": self.daily_realized_pnl, "drawdown": self.current_drawdown})
         return pnl
 
     def unrealized_pnl(self, symbol: str, mark_price: float) -> float:

@@ -64,13 +64,13 @@ class EventBus:
 
     def run_consumer(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
         key = self._key(stream)
-        try:
-            self.redis.xgroup_create(key, consumer_group, id="$", mkstream=True)
-        except redis.ResponseError as e:
-            if "BUSYGROUP" not in str(e):
-                raise
         while not self._stop.is_set():
             try:
+                try:
+                    self.redis.xgroup_create(key, consumer_group, id="$", mkstream=True)
+                except redis.ResponseError as e:
+                    if "BUSYGROUP" not in str(e):
+                        raise
                 self._poll_once(stream, consumer_group, handler, count=count, block=block)
             except Exception as e:
                 logger.error("EventBus consumer error [%s/%s]: %s", stream, consumer_group, e)
