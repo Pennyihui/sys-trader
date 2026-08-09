@@ -127,7 +127,10 @@ class SystemRunner:
 
         # 统一装配: 执行层 + 信号链 + 风控链
         mode = ExecutionModeManager(ExecutionMode(self.execution_mode_name.lower()))
-        self.orders = OrderManager(gateway=self.gateway, execution_mode=mode)
+        self.orders = OrderManager(
+            gateway=self.gateway, execution_mode=mode,
+            event_bus=self.event_bus, instance=self.instance,
+        )
         self.engine = self._build_signal_chain()
         self.risk_chain = self._build_risk_chain()
         self.step_sizes = self._fetch_step_sizes()

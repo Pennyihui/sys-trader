@@ -58,3 +58,64 @@ class TestOrderManager:
         self.manager.execute_signal("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
         active = self.manager.active_orders
         assert len(active) == 3
+
+
+@pytest.mark.unit
+def test_publishes_order_filled_after_submit():
+    bus = MagicMock()
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(
+        order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED",
+        executed_qty=0.1, avg_price=64000.0)
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE),
+                       event_bus=bus)
+    mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    calls = [c[0][0] for c in bus.publish.call_args_list]
+    assert "order.filled" in calls
+
+
+@pytest.mark.unit
+def test_publishes_order_filled_payload_has_fields():
+    """order.filled 载荷包含 instance/symbol/side/status/quantity/price/order_id。"""
+    bus = MagicMock()
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(
+        order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED",
+        executed_qty=0.1, avg_price=64000.0)
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE),
+                       event_bus=bus, instance="paper")
+    mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    stream, payload = bus.publish.call_args[0]
+    assert stream == "order.filled"
+    assert payload["instance"] == "paper"
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["side"] == "BUY"
+    assert payload["order_type"] == "LIMIT"
+    assert payload["status"] == "FILLED"
+    assert payload["quantity"] == 0.1
+    assert payload["price"] == 64000.0
+    assert payload["order_id"] == 1
+
+
+@pytest.mark.unit
+def test_algo_orders_also_publish_order_filled():
+    """STOP_MARKET/TAKE_PROFIT_MARKET 走 algo_id 路径，同样发布事件。"""
+    bus = MagicMock()
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED", executed_qty=0.1, avg_price=64000.0)
+    gw.place_algo_order.return_value = AlgoOrderResponse(algo_id=100, symbol="BTCUSDT", side="SELL", status="FILLED")
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE),
+                       event_bus=bus)
+    mgr.execute_signal("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    calls = [c[0][0] for c in bus.publish.call_args_list]
+    assert calls.count("order.filled") == 3  # entry + stop_loss + take_profit
+
+
+@pytest.mark.unit
+def test_no_event_bus_is_silent():
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(
+        order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED",
+        executed_qty=0.1, avg_price=64000.0)
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
+    mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)  # 不抛异常

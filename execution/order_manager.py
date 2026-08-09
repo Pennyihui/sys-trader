@@ -57,6 +57,8 @@ class OrderManager:
         execution_mode: Optional[ExecutionModeManager] = None,
         db: Optional[TradeDatabase] = None,
         paper_trader: Optional[PaperTrader] = None,
+        event_bus=None,
+        instance: str = "live",
     ):
         self.gateway = gateway
         self.max_retries = max_retries
@@ -67,6 +69,8 @@ class OrderManager:
         self.execution_mode = execution_mode or ExecutionModeManager()
         self.db = db  # 可选：订单生命周期持久化，None 时跳过
         self.paper_trader = paper_trader  # PAPER 模式所需，None 且处于 PAPER 模式时抛错
+        self.event_bus = event_bus  # 事件总线（可选，None 时静默）
+        self.instance = instance  # 实例标识（live/paper），事件载荷标记
         self._orders: List[ManagedOrder] = []
 
     # ─── 执行模式路由 ───
@@ -103,6 +107,19 @@ class OrderManager:
             db_order_id, status or "ERROR", exchange_order_id,
             filled_qty, avg_price, 0.0, error,
         )
+
+    def _publish_order(self, resp, req_side: str, symbol: str, order_type: str):
+        """发布 order.filled 事件到 EventBus（可选，None 时静默）。"""
+        if self.event_bus is None:
+            return
+        self.event_bus.publish("order.filled", {
+            "instance": self.instance, "symbol": symbol, "side": req_side,
+            "order_type": order_type, "status": resp.status,
+            "quantity": getattr(resp, "executed_qty", None) or getattr(resp, "quantity", None),
+            "price": getattr(resp, "avg_price", None),
+            "order_id": getattr(resp, "order_id", 0) or getattr(resp, "algo_id", 0),
+            "error": getattr(resp, "error", None),
+        })
 
     def _place_with_retry(self, req: OrderRequest) -> OrderResponse:
         mode = self.execution_mode.mode
@@ -213,6 +230,7 @@ class OrderManager:
             str(resp.order_id) if resp.order_id else "",
             resp.executed_qty, resp.avg_price, resp.error or "",
         )
+        self._publish_order(resp, side, symbol, req.order_type)
         return order
 
     def submit_stop_loss(
@@ -247,6 +265,7 @@ class OrderManager:
             str(resp.algo_id) if resp.algo_id else "",
             error=resp.error or "",
         )
+        self._publish_order(resp, side, symbol, req.order_type)
         return order
 
     def submit_take_profit(
@@ -281,6 +300,7 @@ class OrderManager:
             str(resp.algo_id) if resp.algo_id else "",
             error=resp.error or "",
         )
+        self._publish_order(resp, side, symbol, req.order_type)
         return order
 
     def execute_signal(
