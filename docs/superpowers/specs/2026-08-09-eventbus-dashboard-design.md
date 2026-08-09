@@ -52,7 +52,11 @@ Preflight 预检、Idempotency 幂等、Reconciler 对账、启动时账户权�
 
 CLI/env：`--strategy`、`--symbols`、`--execution-mode`（dry_run/paper/live）、`--hours`、`--testnet`。
 
-### 3.4 stability_test.py 转型
+### 3.4 策略层定位
+
+当前 `scalping_15m` 是**临时测试策略**（仅用于验证链路）。策略层基于 IStrategy + StrategyRegistry 可插拔设计，装配不绑定任何具体策略——真实策略（agent_team 的 RL 4 层：Weekly XGBoost / Daily XGBoost / 4h RL+贝叶斯）实现为 IStrategy 后，通过 `--strategy` 注入即可，装配零改动。真实策略迁移是独立待办，不在本期范围。
+
+### 3.5 stability_test.py 转型
 
 保留 `python tools/stability_test.py --hours 24` 用法，内部改为构造 SystemRunner 并复用其报告输出。不再维护第二条装配。
 
@@ -130,3 +134,4 @@ CLI/env：`--strategy`、`--symbols`、`--execution-mode`（dry_run/paper/live�
 - LIMIT 入场切换（OrderManager 参数化入口类型，本期默认按 OrderManager 现有行为）。
 - 本机 docker 运行（资源开销，见决策表）。
 - guardian/scheduler 模块接入（独立待办）。
+- 真实策略迁移（agent_team RL 策略实现为 IStrategy，独立待办；本期仅确保装配可插拔）。
