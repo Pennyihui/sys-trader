@@ -76,6 +76,7 @@ CLI/env：`--strategy`、`--symbols`、`--execution-mode`（dry_run/paper/live�
 | `signal.generated` | `SignalEngine.run` 产出 Signal | 策略、方向、symbol、价格、conviction |
 | `signal.approved` / `signal.rejected` | `MiddlewareChain.process` 结果处 | 通过/拒绝 + 风控原因 |
 | `heartbeat` | runner 新增 `HeartbeatPublisher` 线程（5s 周期读 MetricsCollector）；**本次一并埋点**：各模块关键循环点调用 `MetricsCollector.instance().heartbeat(module)`（feed 消息循环 / reconciler / runner 主循环）——否则 MetricsCollector 为空，dashboard 模块状态全空 | 各模块最后心跳时间 |
+| `command`（反向） | dashboard /ws 命令 → publish；SystemRunner 订阅 | `emergency_stop` / `resume` —— kill switch 接线（见测试管道 spec 第 7 节） |
 
 ### 5.2 注入与容错
 
