@@ -5,7 +5,6 @@ import logging
 import urllib.request
 from typing import Any, Dict, Optional
 from market_data.feed import MarketDataFeed
-from portfolio.tracker import PortfolioTracker
 
 logger = logging.getLogger(__name__)
 
@@ -16,30 +15,33 @@ NETWORK_MONITOR_API = "http://127.0.0.1:8766"
 
 
 class DataCollector:
-    def __init__(self, feed: MarketDataFeed, portfolio: PortfolioTracker):
+    def __init__(self, state_store, feed: MarketDataFeed):
+        self.state = state_store
         self.feed = feed
-        self.portfolio = portfolio
 
     def collect(self) -> Dict[str, Any]:
         positions = []
-        for symbol, pos in self.portfolio.positions.items():
-            mark = self.feed.get_mark_price(symbol) or 0.0
-            upnl = self.portfolio.unrealized_pnl(symbol, mark)
+        for symbol, pos in self.state.positions.items():
+            mark = self.feed.get_mark_price(symbol) or pos.get("mark_price") or 0.0
+            upnl = pos.get("unrealized_pnl", 0.0)
             positions.append({
                 "symbol": symbol,
-                "direction": pos.direction,
-                "quantity": pos.quantity,
-                "entry_price": pos.entry_price,
+                "direction": pos.get("direction"),
+                "quantity": pos.get("quantity"),
+                "entry_price": pos.get("entry_price"),
                 "mark_price": round(mark, 2),
                 "unrealized_pnl": round(upnl, 2),
             })
         return {
-            "equity": round(self.portfolio.total_equity, 2),
-            "margin_ratio": round(self.portfolio.margin_ratio, 2),
-            "daily_pnl": round(self.portfolio.daily_realized_pnl, 2),
-            "drawdown": round(self.portfolio.current_drawdown, 4),
+            "equity": round(self.state.equity, 2),
+            "margin_ratio": round(self.state.margin_ratio, 2),
+            "daily_pnl": round(self.state.daily_pnl, 2),
+            "drawdown": round(self.state.drawdown, 4),
             "position_count": len(positions),
             "positions": positions,
+            "signals": getattr(self.state, "signals", []),
+            "orders": getattr(self.state, "orders", []),
+            "heartbeats": getattr(self.state, "heartbeats", {}),
             "prices": self._collect_prices(),
             "proxy_pool": self._collect_proxy_pool(),
             "network": self._collect_network(),
@@ -47,7 +49,7 @@ class DataCollector:
 
     def _collect_prices(self) -> Dict:
         prices = {}
-        for symbol in list(self.portfolio.positions.keys()):
+        for symbol in list(self.state.positions.keys()):
             last = self.feed.get_last_price(symbol)
             mark = self.feed.get_mark_price(symbol)
             if last or mark:

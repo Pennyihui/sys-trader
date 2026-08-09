@@ -93,10 +93,12 @@ def create_app(data_collector: Optional[DataCollector] = None) -> FastAPI:
     未提供 data_collector 时创建空实例供测试/开发使用。
     """
     if data_collector is None:
-        from portfolio.tracker import PortfolioTracker
+        from shared.event_bus import EventBus
+        from dashboard.state_store import StateStore
         from market_data.feed import MarketDataFeed
         feed = MarketDataFeed(symbols=[], proxy_host="127.0.0.1", proxy_port=7897)
-        collector = DataCollector(feed=feed, portfolio=PortfolioTracker())
+        store = StateStore(event_bus=EventBus(), instance_filter="live")
+        collector = DataCollector(state_store=store, feed=feed)
     else:
         collector = data_collector
     return DashboardServer(data_collector=collector).app
