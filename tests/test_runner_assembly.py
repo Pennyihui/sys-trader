@@ -178,3 +178,10 @@ def test_proxy_host_from_env(monkeypatch):
         assert captured["proxy_port"] == 7890
         # gateway 未显式传 proxy 时同样读环境变量
         assert r.gateway.proxies["https"] == "http://host.docker.internal:7890"
+
+
+@pytest.mark.unit
+def test_risk_per_trade_parameterized():
+    """risk_per_trade 构造参数生效 (实盘分级 D 阶段旋钮 0.002→0.005→0.010→0.015)。"""
+    r = SystemRunner(risk_per_trade=0.005)
+    assert r.risk_per_trade == 0.005
