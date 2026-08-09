@@ -9,6 +9,7 @@
 import json
 import threading
 import logging
+import time
 from typing import Callable, Dict, List, Optional
 from market_data.kline_buffer import KlineBuffer, Kline
 from monitor.collector import MetricsCollector
@@ -19,13 +20,15 @@ logger = logging.getLogger(__name__)
 class _ConnState:
     """单条 WebSocket 连接的状态跟踪。"""
 
-    __slots__ = ("conn_id", "ws", "thread", "connected")
+    __slots__ = ("conn_id", "ws", "thread", "connected", "started_ts", "last_msg_ts")
 
     def __init__(self, conn_id: int):
         self.conn_id = conn_id
         self.ws = None
         self.thread = None
         self.connected = False
+        self.started_ts = 0.0   # 连接建立时间（断连诊断：uptime）
+        self.last_msg_ts = 0.0  # 最后一条消息时间（断连诊断：last_msg_ago）
 
 
 class MarketDataFeed:
@@ -122,6 +125,9 @@ class MarketDataFeed:
 
     def _on_message_wrapper(self, conn_id: int, raw: str):
         """消息分发：只有主连接的消息才处理（CPython 下 int 读原子安全）。"""
+        # 每条连接（含备用）都记录最后消息时间，供断连诊断
+        if conn_id < len(self._conns):
+            self._conns[conn_id].last_msg_ts = time.time()
         if conn_id != self._primary_idx:
             return
         # 模块心跳: 主连接有消息到达即视为 feed 存活
@@ -167,13 +173,25 @@ class MarketDataFeed:
 
     def _on_conn_open(self, conn_id: int):
         if conn_id < len(self._conns):
-            self._conns[conn_id].connected = True
+            state = self._conns[conn_id]
+            state.connected = True
+            state.started_ts = time.time()
         logger.info("Conn %d open (primary=%s)", conn_id, conn_id == self._primary_idx)
 
     def _on_conn_close(self, conn_id: int, status, msg: str):
+        last_msg_ago = -1.0
+        uptime = -1.0
         if conn_id < len(self._conns):
-            self._conns[conn_id].connected = False
-        logger.info("Conn %d closed (%s): %s", conn_id, status, msg)
+            state = self._conns[conn_id]
+            state.connected = False
+            if getattr(state, "started_ts", 0.0):
+                uptime = time.time() - state.started_ts
+            if getattr(state, "last_msg_ts", 0.0):
+                last_msg_ago = time.time() - state.last_msg_ts
+        logger.warning(
+            "WS disconnected conn=%d close_code=%s last_msg_ago=%.1fs uptime=%.1fs (msg=%s)",
+            conn_id, status, last_msg_ago, uptime, msg,
+        )
 
     def _on_conn_error(self, conn_id: int, error):
         logger.error("Conn %d error: %s", conn_id, error)

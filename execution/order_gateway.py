@@ -82,6 +82,10 @@ class OrderGateway:
             "http": f"http://{proxy_host}:{proxy_port}",
             "https": f"http://{proxy_host}:{proxy_port}",
         }
+        # 业务错误退避（429 限流 / -1021 时间戳超窗）在 _request 内部重试，
+        # 网络异常仍由外层 @retrier 处理
+        self.retry_business_errors = 3
+        self.retry_business_backoff = 1.0
 
     def _sign(self, params: dict) -> str:
         query = urlencode(params)
@@ -89,19 +93,42 @@ class OrderGateway:
             self.api_secret.encode(), query.encode(), hashlib.sha256
         ).hexdigest()
 
+    @staticmethod
+    def _is_business_retryable(resp, body: dict) -> bool:
+        """HTTP 429（限流）或 Binance 业务码 -1021（时间戳超窗，代理延迟
+        尖峰导致）值得退避重试；其余业务错误（-1100 等）立即返回。"""
+        if resp.status_code == 429:
+            return True
+        return body.get("code") == -1021
+
     @retrier(max_retries=3, backoff=1.0, retry_on=(requests.exceptions.RequestException,))
     def _request(self, method: str, endpoint: str, params: dict) -> dict:
-        params["timestamp"] = int(time.time() * 1000)
-        params["signature"] = self._sign(params)
         url = f"{self.base_url}{endpoint}"
         headers = {"X-MBX-APIKEY": self.api_key}
-        if method == "POST":
-            resp = requests.post(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
-        elif method == "DELETE":
-            resp = requests.delete(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
-        else:
-            resp = requests.get(url, headers=headers, params=params, timeout=10, proxies=self.proxies)
-        return resp.json()
+        last_body = None
+        for attempt in range(self.retry_business_errors):
+            # 每次重试都重新签名：时间戳必须刷新，否则 -1021 不会自愈
+            params["timestamp"] = int(time.time() * 1000)
+            params["signature"] = self._sign(params)
+            if method == "POST":
+                resp = requests.post(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
+            else:
+                resp = requests.get(url, headers=headers, params=params, timeout=10, proxies=self.proxies)
+            body = resp.json()
+            last_body = body
+            if not self._is_business_retryable(resp, body) or attempt == self.retry_business_errors - 1:
+                return body
+            delay = (2 ** attempt) * self.retry_business_backoff
+            logger.warning(
+                "Business error %s %s (attempt %d/%d, http=%d code=%s): retry in %.1fs",
+                method, endpoint, attempt + 1, self.retry_business_errors,
+                resp.status_code, body.get("code", "?"), delay,
+            )
+            if delay > 0:
+                time.sleep(delay)
+        return last_body
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
         params = {

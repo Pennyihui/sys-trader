@@ -52,3 +52,67 @@ class TestOrderGateway:
         gw = OrderGateway(testnet=False)
         assert "testnet" not in gw.base_url
         assert "fapi.binance.com" in gw.base_url
+
+
+@pytest.mark.unit
+class TestOrderGatewayRequestRetry:
+    """429 限流 / -1021 时间戳超窗的业务退避重试（Task 18）。"""
+
+    def setup_method(self):
+        os.environ["BINANCE_API_KEY"] = "test_key"
+        os.environ["BINANCE_API_SECRET"] = "test_secret"
+        self.gw = OrderGateway(testnet=True)
+        self.gw.retry_business_backoff = 0.0  # 测试不等待
+
+    @staticmethod
+    def _resp(status_code, payload):
+        r = MagicMock()
+        r.status_code = status_code
+        r.json.return_value = payload
+        return r
+
+    def test_429_retries_then_succeeds(self):
+        responses = [
+            self._resp(429, {"code": -1003, "msg": "Too many requests"}),
+            self._resp(200, {"orderId": 42, "status": "NEW"}),
+        ]
+        with patch("execution.order_gateway.requests.post", side_effect=responses) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result["orderId"] == 42
+        assert mock_post.call_count == 2
+
+    def test_minus_1021_retries_then_succeeds(self):
+        responses = [
+            self._resp(200, {"code": -1021,
+                             "msg": "Timestamp for this request is outside of the recvWindow."}),
+            self._resp(200, {"orderId": 43, "status": "NEW"}),
+        ]
+        with patch("execution.order_gateway.requests.post", side_effect=responses) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result["orderId"] == 43
+        assert mock_post.call_count == 2
+
+    def test_429_gives_up_after_max_retries(self):
+        self.gw.retry_business_errors = 3
+        responses = [self._resp(429, {"code": -1003, "msg": "Too many requests"})] * 3
+        with patch("execution.order_gateway.requests.post", side_effect=responses) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result["code"] == -1003
+        assert mock_post.call_count == 3
+
+    def test_non_retryable_business_error_returns_immediately(self):
+        responses = [self._resp(200, {"code": -1100, "msg": "Invalid symbol."})]
+        with patch("execution.order_gateway.requests.post", side_effect=responses) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result["code"] == -1100
+        assert mock_post.call_count == 1
+
+    def test_get_uses_same_retry_path(self):
+        responses = [
+            self._resp(429, {"code": -1003, "msg": "Too many requests"}),
+            self._resp(200, {}),
+        ]
+        with patch("execution.order_gateway.requests.get", side_effect=responses) as mock_get:
+            result = self.gw._request("GET", "/fapi/v2/account", {})
+        assert result == {}
+        assert mock_get.call_count == 2
