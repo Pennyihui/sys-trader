@@ -35,6 +35,16 @@ def collect_metrics(log_path: str = None) -> dict:
             "errors_last_hour": count_errors(log_path)}
 
 
+def sample_and_append(out: str, log_path: str, last_errors: int) -> int:
+    """采集一次指标并追加 CSV 行（errors_delta 列 = 错误增量），
+    返回最新错误累计值供下次增量计算。"""
+    m = collect_metrics(log_path)
+    delta = max(0, m["errors_last_hour"] - last_errors)
+    with open(out, "a") as f:
+        f.write(f"{int(m['ts'])},{m['rss_mb']},{delta}\n")
+    return m["errors_last_hour"]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="logs/soak_metrics.csv")
@@ -43,17 +53,13 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    header = "ts,rss_mb,errors_total\n"
+    header = "ts,rss_mb,errors_delta\n"
     if not os.path.exists(args.out):
         with open(args.out, "w") as f:
             f.write(header)
     last_errors = 0
     while True:
-        m = collect_metrics(args.log)
-        delta = max(0, m["errors_last_hour"] - last_errors)
-        last_errors = m["errors_last_hour"]
-        with open(args.out, "a") as f:
-            f.write(f"{int(m['ts'])},{m['rss_mb']},{delta}\n")
+        last_errors = sample_and_append(args.out, args.log, last_errors)
         time.sleep(args.interval)
 
 

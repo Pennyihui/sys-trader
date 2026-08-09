@@ -116,3 +116,26 @@ class TestOrderGatewayRequestRetry:
             result = self.gw._request("GET", "/fapi/v2/account", {})
         assert result == {}
         assert mock_get.call_count == 2
+
+    def test_429_with_non_json_body_still_retries(self):
+        """代理/CDN 层返回非 JSON 429 页面：body 视为 {}，状态码仍触发重试。"""
+        bad = self._resp(429, {"code": -1003, "msg": "Too many requests"})
+        bad.json.side_effect = ValueError("no json body")
+        bad.text = "<html>Rate limited by CDN</html>"
+        ok = self._resp(200, {"orderId": 44, "status": "NEW"})
+        with patch("execution.order_gateway.requests.post",
+                   side_effect=[bad, ok]) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result["orderId"] == 44
+        assert mock_post.call_count == 2
+
+    def test_non_json_200_body_returns_empty_immediately(self):
+        """200 但 body 非 JSON（非重试条件）：返回 {}，不再触发外层重试。"""
+        bad = self._resp(200, {})
+        bad.json.side_effect = ValueError("no json body")
+        bad.text = "<html>ok page</html>"
+        with patch("execution.order_gateway.requests.post",
+                   side_effect=[bad]) as mock_post:
+            result = self.gw._request("POST", "/fapi/v1/order", {})
+        assert result == {}
+        assert mock_post.call_count == 1

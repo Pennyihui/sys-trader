@@ -103,9 +103,10 @@ class OrderGateway:
 
     @retrier(max_retries=3, backoff=1.0, retry_on=(requests.exceptions.RequestException,))
     def _request(self, method: str, endpoint: str, params: dict) -> dict:
+        # 幂等性风险：429 重试时若服务器已接受请求但响应丢失，可能重复成交。
+        # 暂不引入 clientOrderId 幂等键（较大改动，另立待办）。
         url = f"{self.base_url}{endpoint}"
         headers = {"X-MBX-APIKEY": self.api_key}
-        last_body = None
         for attempt in range(self.retry_business_errors):
             # 每次重试都重新签名：时间戳必须刷新，否则 -1021 不会自愈
             params["timestamp"] = int(time.time() * 1000)
@@ -116,8 +117,16 @@ class OrderGateway:
                 resp = requests.delete(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
             else:
                 resp = requests.get(url, headers=headers, params=params, timeout=10, proxies=self.proxies)
-            body = resp.json()
-            last_body = body
+            try:
+                body = resp.json()
+            except ValueError:
+                # 代理/CDN 层可能返回非 JSON 页面：body 视为空，
+                # 429 状态码本身仍触发重试
+                logger.warning(
+                    "Non-JSON response %s %s (http=%d): %.200s",
+                    method, endpoint, resp.status_code, resp.text,
+                )
+                body = {}
             if not self._is_business_retryable(resp, body) or attempt == self.retry_business_errors - 1:
                 return body
             delay = (2 ** attempt) * self.retry_business_backoff
@@ -128,7 +137,6 @@ class OrderGateway:
             )
             if delay > 0:
                 time.sleep(delay)
-        return last_body
 
     def place_order(self, req: OrderRequest) -> OrderResponse:
         params = {
