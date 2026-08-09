@@ -50,11 +50,14 @@ class SignalEngine:
         elif timeframe == "4h":
             signal = self._run_4h(symbol, ohlcv)
         # 统一出口埋点: 产出 Signal 时发布 signal.generated 事件
+        # signal_id 是跨事件流 (signal.generated ↔ order.filled) 的唯一关联键
         if signal is not None and self.event_bus is not None:
             self.event_bus.publish("signal.generated", {
                 "instance": self.instance, "symbol": signal.symbol,
                 "direction": signal.direction, "conviction": signal.conviction,
-                "entry_price": signal.entry_price, "strategy": getattr(self.strategy, "name", ""),
+                "entry_price": signal.entry_price, "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit, "signal_id": signal.signal_id,
+                "strategy": getattr(self.strategy, "name", ""),
             })
         return signal
 

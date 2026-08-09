@@ -37,9 +37,11 @@ class TestSignalEngine:
         engine = SignalEngine(event_bus=bus, instance="paper")
         strat = MagicMock()
         strat.timeframe = "15m"
-        strat.analyze.return_value = Signal(
+        strat.name = "test_strategy"
+        sig = Signal(
             symbol="BTCUSDT", direction="LONG", conviction=0.8,
             entry_price=64000.0, stop_loss=62000.0, take_profit=68000.0)
+        strat.analyze.return_value = sig
         engine.strategy = strat
         engine.run("BTCUSDT", "15m", [{"close": 64000.0}])
         bus.publish.assert_called_once()
@@ -47,6 +49,24 @@ class TestSignalEngine:
         assert stream == "signal.generated"
         assert payload["instance"] == "paper"
         assert payload["symbol"] == "BTCUSDT"
+        assert payload["direction"] == "LONG"
+        assert payload["conviction"] == 0.8
+        assert payload["entry_price"] == 64000.0
+        assert payload["stop_loss"] == 62000.0
+        assert payload["take_profit"] == 68000.0
+        assert payload["signal_id"] == sig.signal_id
+        assert payload["strategy"] == "test_strategy"
+
+    def test_no_signal_does_not_publish(self):
+        bus = MagicMock()
+        engine = SignalEngine(event_bus=bus, instance="paper")
+        strat = MagicMock()
+        strat.timeframe = "15m"
+        strat.analyze.return_value = None
+        engine.strategy = strat
+        signal = engine.run("BTCUSDT", "15m", [{"close": 64000.0}])
+        assert signal is None
+        bus.publish.assert_not_called()
 
     def test_no_event_bus_is_silent(self):
         engine = SignalEngine()
