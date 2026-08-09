@@ -119,3 +119,30 @@ def test_no_event_bus_is_silent():
         executed_qty=0.1, avg_price=64000.0)
     mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
     mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)  # 不抛异常
+
+
+@pytest.mark.unit
+def test_algo_publish_payload_has_quantity():
+    """algo 单（ST/TP）payload 回退到请求侧数量与触发价，order_id 用 algo_id。"""
+    bus = MagicMock()
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED", executed_qty=0.1, avg_price=64000.0)
+    gw.place_algo_order.return_value = AlgoOrderResponse(algo_id=100, symbol="BTCUSDT", side="SELL", status="FILLED")
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE),
+                       event_bus=bus)
+    mgr.submit_stop_loss("BTCUSDT", "LONG", 0.1, 62000.0)
+    stream, payload = bus.publish.call_args[0]
+    assert stream == "order.filled"
+    assert payload["quantity"] == 0.1
+    assert payload["price"] == 62000.0  # req.trigger_price = round_price(62000.0)
+    assert payload["order_id"] == 100  # algo_id
+
+
+@pytest.mark.unit
+def test_dry_run_does_not_publish():
+    """DRY_RUN 无真实成交（status NEW），不发布 order.filled。"""
+    bus = MagicMock()
+    gw = MagicMock()
+    mgr = OrderManager(gateway=gw, event_bus=bus)  # 默认 DRY_RUN
+    mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    bus.publish.assert_not_called()

@@ -58,7 +58,7 @@ class OrderManager:
         db: Optional[TradeDatabase] = None,
         paper_trader: Optional[PaperTrader] = None,
         event_bus=None,
-        instance: str = "live",
+        instance: Optional[str] = None,
     ):
         self.gateway = gateway
         self.max_retries = max_retries
@@ -70,7 +70,8 @@ class OrderManager:
         self.db = db  # 可选：订单生命周期持久化，None 时跳过
         self.paper_trader = paper_trader  # PAPER 模式所需，None 且处于 PAPER 模式时抛错
         self.event_bus = event_bus  # 事件总线（可选，None 时静默）
-        self.instance = instance  # 实例标识（live/paper），事件载荷标记
+        # 实例标识（live/paper），默认跟随执行模式（显式传入时优先）
+        self.instance = instance or self.execution_mode.mode.value
         self._orders: List[ManagedOrder] = []
 
     # ─── 执行模式路由 ───
@@ -108,15 +109,24 @@ class OrderManager:
             filled_qty, avg_price, 0.0, error,
         )
 
-    def _publish_order(self, resp, req_side: str, symbol: str, order_type: str):
-        """发布 order.filled 事件到 EventBus（可选，None 时静默）。"""
+    def _publish_order(self, resp, req, req_side: str, symbol: str, order_type: str):
+        """发布 order.filled 事件到 EventBus（仅成交状态；event_bus 为 None 时静默）。"""
         if self.event_bus is None:
             return
+        if resp.status not in ("FILLED", "PARTIALLY_FILLED"):
+            return
+        # resp 成交字段缺失/为 0 时回退到请求侧（algo 单无 executed_qty/avg_price）
+        quantity = getattr(resp, "executed_qty", None)
+        if quantity is None:
+            quantity = req.quantity
+        price = getattr(resp, "avg_price", None)
+        if price is None:
+            price = getattr(req, "trigger_price", None)
         self.event_bus.publish("order.filled", {
             "instance": self.instance, "symbol": symbol, "side": req_side,
             "order_type": order_type, "status": resp.status,
-            "quantity": getattr(resp, "executed_qty", None) or getattr(resp, "quantity", None),
-            "price": getattr(resp, "avg_price", None),
+            "quantity": quantity,
+            "price": price,
             "order_id": getattr(resp, "order_id", 0) or getattr(resp, "algo_id", 0),
             "error": getattr(resp, "error", None),
         })
@@ -230,7 +240,7 @@ class OrderManager:
             str(resp.order_id) if resp.order_id else "",
             resp.executed_qty, resp.avg_price, resp.error or "",
         )
-        self._publish_order(resp, side, symbol, req.order_type)
+        self._publish_order(resp, req, side, symbol, req.order_type)
         return order
 
     def submit_stop_loss(
@@ -265,7 +275,7 @@ class OrderManager:
             str(resp.algo_id) if resp.algo_id else "",
             error=resp.error or "",
         )
-        self._publish_order(resp, side, symbol, req.order_type)
+        self._publish_order(resp, req, side, symbol, req.order_type)
         return order
 
     def submit_take_profit(
@@ -300,7 +310,7 @@ class OrderManager:
             str(resp.algo_id) if resp.algo_id else "",
             error=resp.error or "",
         )
-        self._publish_order(resp, side, symbol, req.order_type)
+        self._publish_order(resp, req, side, symbol, req.order_type)
         return order
 
     def execute_signal(
