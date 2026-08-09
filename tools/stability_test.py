@@ -35,6 +35,7 @@ from risk.daily_loss_limit import DailyLossLimit
 from risk.concentration import ConcentrationCheck
 from execution.order_manager import OrderManager
 from execution.order_gateway import OrderGateway, OrderRequest
+from execution.order_utils import align_qty_to_step
 from portfolio.tracker import PortfolioTracker, Position
 from shared.config_loader import load_env
 from shared.execution_mode import ExecutionMode, ExecutionModeManager
@@ -63,6 +64,7 @@ class StabilityRunner:
         # testnet 真实下单：显式 LIVE（OrderManager 默认 DRY_RUN）
         self.orders = OrderManager(gateway=self.gateway, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
 
+        self.step_sizes: dict = {}  # symbol -> stepSize
         self.stats = {
             "signals": 0,
             "risk_rejected": 0,
@@ -86,6 +88,9 @@ class StabilityRunner:
         )
         self.feed.start()
         time.sleep(3)
+        logger.info("获取各标的 stepSize...")
+        self.step_sizes = self._fetch_step_sizes()
+        logger.info("stepSize: %s", self.step_sizes or "获取失败(下单将退化为4位小数)")
         logger.info("回填历史数据...")
         self.feed.backfill(limit=200)
         self.engine = SignalEngine(strategy=StrategyRegistry.get("scalping_15m"))
@@ -127,7 +132,8 @@ class StabilityRunner:
         price = self.feed.get_last_price(signal.symbol) or signal.entry_price
         min_qty = 5.0 / price if price else 0.001
         max_qty = 100.0 / price if price else 0.01
-        qty = round(min(max(size, min_qty), max_qty), 4)
+        step = self.step_sizes.get(signal.symbol, 0.0)
+        qty = align_qty_to_step(size, step, min_qty, max_qty)
         side = "BUY" if signal.direction == "LONG" else "SELL"
         req = OrderRequest(symbol=signal.symbol, side=side, order_type="MARKET", quantity=qty)
         try:
@@ -168,6 +174,33 @@ class StabilityRunner:
             logger.warning("WS 连接降级: %d/%d 在线", connected, len(self.feed._conns))
             self._network_diag(reason=f"ws_downgrade_{connected}_{len(self.feed._conns)}")
 
+    def _fetch_step_sizes(self) -> dict:
+        """从 exchangeInfo 获取各标的的最小下单粒度 stepSize。
+
+        Binance 要求下单数量必须是 stepSize 的整数倍（精度限制）。
+        各币种不同: BTC=0.0001, ETH=0.001, SOL=0.01。
+        失败时返回空 dict，下单退化为 4 位小数对齐（仅 BTC 可用）。
+        """
+        import requests
+        try:
+            r = requests.get(
+                f"{OrderGateway.BASE_URL_TESTNET}/fapi/v1/exchangeInfo",
+                proxies={"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"},
+                timeout=10,
+            )
+            info = r.json()
+            result = {}
+            for s in info.get("symbols", []):
+                if s.get("symbol") in self.symbols:
+                    for f in s.get("filters", []):
+                        if f.get("filterType") == "LOT_SIZE":
+                            result[s["symbol"]] = float(f["stepSize"])
+                            break
+            return result
+        except Exception as e:
+            logger.warning("获取 stepSize 失败: %s", e)
+            return {}
+
     def _network_diag(self, reason: str):
         """断连/停滞时记录网络诊断，用于确凿判断根因。
 
@@ -189,6 +222,7 @@ class StabilityRunner:
                 r = subprocess.run(
                     ["ping", "-n", "1", "-w", "2000", host],
                     capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,  # 不弹控制台窗口
                 )
                 return "OK" if r.returncode == 0 else "FAIL"
             except Exception:
@@ -218,6 +252,7 @@ class StabilityRunner:
             r = subprocess.run(
                 ["route", "print", "0.0.0.0"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # 不弹控制台窗口
             )
             # 匹配 "0.0.0.0          0.0.0.0      192.168.1.1"
             m = re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", r.stdout)
