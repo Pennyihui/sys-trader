@@ -100,3 +100,22 @@ class TestCreateApp:
         collector = MagicMock()
         app = create_app(data_collector=collector)
         assert app is not None
+
+    def test_create_app_strips_and_guards_symbols(self, monkeypatch):
+        """DASHBOARD_SYMBOLS 解析：strip 空格 + 过滤空项。"""
+        monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1")
+        monkeypatch.setenv("DASHBOARD_SYMBOLS", " BTCUSDT, ETHUSDT ,,SOLUSDT,")
+        captured = {}
+
+        class FakeFeed:
+            def __init__(self, symbols, **kw):
+                captured["symbols"] = symbols
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr("market_data.feed.MarketDataFeed", FakeFeed)
+        from dashboard.server import create_app
+        app = create_app()
+        assert app is not None
+        assert captured["symbols"] == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]

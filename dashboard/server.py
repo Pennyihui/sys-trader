@@ -113,7 +113,7 @@ def create_app(data_collector: Optional[DataCollector] = None, event_bus=None) -
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
         if event_bus is None:
             event_bus = EventBus(redis_url=redis_url)
-        symbols = os.environ.get("DASHBOARD_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+        symbols = [s.strip() for s in os.environ.get("DASHBOARD_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
         feed = MarketDataFeed(symbols=symbols, proxy_host="127.0.0.1", proxy_port=7897)
         store = StateStore(event_bus=event_bus, instance_filter=os.environ.get("DASHBOARD_INSTANCE", "live"))
         try:
