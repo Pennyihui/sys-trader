@@ -165,7 +165,7 @@ class SystemRunner:
 
     def _build_risk_chain(self) -> MiddlewareChain:
         """风控链: 仓位 → 回撤 → 日亏损 → 集中度。"""
-        chain = MiddlewareChain()
+        chain = MiddlewareChain(event_bus=self.event_bus, instance=self.instance)
         chain.add(PositionSizer(risk_per_trade=self.risk_per_trade))
         chain.add(DrawdownBreaker(
             max_drawdown=0.15, consecutive_loss_breaker=3, cooldown_minutes=120

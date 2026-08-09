@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 from risk.chain import MiddlewareChain, MiddlewareResult
 from risk.position_sizer import PositionSizer
 from risk.drawdown_breaker import DrawdownBreaker
@@ -71,3 +72,41 @@ class TestRiskChain:
         result = self.chain.process(signal, self.tracker)
         assert result.rejected
         assert "DailyLossLimit" in result.reason
+
+
+@pytest.mark.unit
+def test_publishes_approved_and_rejected():
+    bus = MagicMock()
+    chain = MiddlewareChain(event_bus=bus)
+    sig = Signal(symbol="BTCUSDT", direction="LONG", conviction=0.8,
+                 entry_price=64000.0, stop_loss=62000.0, take_profit=68000.0)
+    portfolio = PortfolioTracker(initial_equity=10000.0)
+
+    # 空链 → approved
+    chain.process(sig, portfolio)
+    streams = [c[0][0] for c in bus.publish.call_args_list]
+    assert "signal.approved" in streams
+    # approved payload: instance/symbol/direction/modifications
+    approved = [c for c in bus.publish.call_args_list if c[0][0] == "signal.approved"][0]
+    payload = approved[0][1]
+    assert payload["instance"] == "live"
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["direction"] == "LONG"
+    assert isinstance(payload["modifications"], dict)
+
+    # 拒绝中间件 → rejected
+    class Rejecter:
+        def process(self, signal, portfolio):
+            return MiddlewareResult(rejected=True, reason="test")
+
+    chain.add(Rejecter())
+    chain.process(sig, portfolio)
+    streams = [c[0][0] for c in bus.publish.call_args_list]
+    assert "signal.rejected" in streams
+    # rejected payload: instance/symbol/direction/reason
+    rejected = [c for c in bus.publish.call_args_list if c[0][0] == "signal.rejected"][0]
+    payload = rejected[0][1]
+    assert payload["instance"] == "live"
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["direction"] == "LONG"
+    assert payload["reason"] == "test"

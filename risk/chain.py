@@ -20,8 +20,10 @@ class Middleware:
 
 
 class MiddlewareChain:
-    def __init__(self):
+    def __init__(self, event_bus=None, instance="live"):
         self._middleware: List[Middleware] = []
+        self._event_bus = event_bus  # 事件总线注入（可选，None 时静默）
+        self.instance = instance  # 实例标识: live / paper / dry_run
 
     def add(self, mw: Middleware):
         self._middleware.append(mw)
@@ -33,8 +35,20 @@ class MiddlewareChain:
         for mw in self._middleware:
             result = mw.process(current_signal, portfolio)
             if result.rejected:
+                # 埋点: 任一中件间拒绝 → signal.rejected（event_bus 为 None 时静默）
+                if self._event_bus is not None:
+                    self._event_bus.publish("signal.rejected", {
+                        "instance": self.instance, "symbol": signal.symbol,
+                        "direction": signal.direction, "reason": result.reason,
+                    })
                 return result
             if result.signal is not None:
                 current_signal = result.signal
             modifications.update(result.modifications)
+        # 埋点: 全部通过 → signal.approved（modifications 为风控修改，如 position_size）
+        if self._event_bus is not None:
+            self._event_bus.publish("signal.approved", {
+                "instance": self.instance, "symbol": signal.symbol,
+                "direction": signal.direction, "modifications": modifications,
+            })
         return MiddlewareResult(rejected=False, signal=current_signal, modifications=modifications)
