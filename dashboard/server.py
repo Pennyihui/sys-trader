@@ -114,7 +114,11 @@ def create_app(data_collector: Optional[DataCollector] = None, event_bus=None) -
         if event_bus is None:
             event_bus = EventBus(redis_url=redis_url)
         symbols = [s.strip() for s in os.environ.get("DASHBOARD_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
-        feed = MarketDataFeed(symbols=symbols, proxy_host="127.0.0.1", proxy_port=7897)
+        feed = MarketDataFeed(
+            symbols=symbols,
+            proxy_host=os.environ.get("PROXY_HOST", "127.0.0.1"),
+            proxy_port=int(os.environ.get("PROXY_PORT", "7897")),
+        )
         store = StateStore(event_bus=event_bus, instance_filter=os.environ.get("DASHBOARD_INSTANCE", "live"))
         try:
             store.start()

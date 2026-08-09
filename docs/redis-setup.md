@@ -14,14 +14,17 @@ EventBus / StateStore / Dashboard 依赖 Redis 兼容服务（默认 `localhost:
 
 `docker-compose.yml` 已含 `redis` 服务；容器内 `REDIS_URL` 指向 redis 容器（`redis://redis:6379`）。
 backend 服务注入 `PROXY_HOST=host.docker.internal`（并配 `extra_hosts` 解析），供容器访问宿主机
-Clash 代理。**注意：当前代码尚未读取 `PROXY_HOST`**（`dashboard/server.py`、`shared/runner.py`
-仍硬编码 `127.0.0.1:7897`）——容器路径的 Binance 访问需后续代码支持；本机 Windows 直跑（Memurai）不受影响。
+Clash 代理。代码（`shared/runner.py`、`dashboard/server.py`、`execution/order_gateway.py`）统一从
+`PROXY_HOST`/`PROXY_PORT` 环境变量读取代理地址，缺省回退 `127.0.0.1:7897`——本机 Windows 直跑
+路径不变，无需设置。
 
 ## 环境变量（可选配置项）
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | REDIS_URL | `redis://localhost:6379` | Redis 连接串。Windows 直跑无需设置（默认已指向本机）；Docker 路径由 docker-compose 设为 `redis://redis:6379` |
+| PROXY_HOST | `127.0.0.1` | HTTP 代理主机（runner/dashboard/gateway 统一读取）。本机直跑无需设置；Docker 路径由 docker-compose 设为 `host.docker.internal`（宿主机 Clash） |
+| PROXY_PORT | `7897` | HTTP 代理端口（Clash 默认 7897） |
 | DASHBOARD_SYMBOLS | `BTCUSDT,ETHUSDT,SOLUSDT` | Dashboard 行情 feed 订阅的交易对（逗号分隔） |
 | DASHBOARD_INSTANCE | `live` | 只消费该 instance 的事件流 |
 

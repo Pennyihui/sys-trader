@@ -119,3 +119,24 @@ class TestCreateApp:
         app = create_app()
         assert app is not None
         assert captured["symbols"] == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+    def test_create_app_feed_uses_proxy_env(self, monkeypatch):
+        """PROXY_HOST/PROXY_PORT 环境变量传入 feed 构造 (docker 路径)。"""
+        monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1")  # 不可达：StateStore 启动失败不崩溃
+        monkeypatch.setenv("PROXY_HOST", "host.docker.internal")
+        monkeypatch.setenv("PROXY_PORT", "7890")
+        captured = {}
+
+        class FakeFeed:
+            def __init__(self, symbols, **kw):
+                captured.update(kw)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr("market_data.feed.MarketDataFeed", FakeFeed)
+        from dashboard.server import create_app
+        app = create_app()
+        assert app is not None
+        assert captured["proxy_host"] == "host.docker.internal"
+        assert captured["proxy_port"] == 7890

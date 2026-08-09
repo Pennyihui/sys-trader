@@ -106,7 +106,8 @@ class SystemRunner:
         if self.feed is None:
             self.feed = MarketDataFeed(
                 symbols=self.symbols,
-                proxy_host="127.0.0.1", proxy_port=7897,
+                proxy_host=os.environ.get("PROXY_HOST", "127.0.0.1"),
+                proxy_port=int(os.environ.get("PROXY_PORT", "7897")),
                 redundant_connections=8,
                 on_kline_closed=self._on_kline_closed,
             )

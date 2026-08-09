@@ -143,3 +143,38 @@ def test_pending_entry_order_skips_new_order(runner):
     runner.orders.execute_signal.assert_not_called()
     assert runner.stats["signals"] == 1
     assert runner.stats["orders_placed"] == 0
+
+
+@pytest.mark.unit
+def test_proxy_host_from_env(monkeypatch):
+    """PROXY_HOST/PROXY_PORT 环境变量传入 feed 与 gateway 构造 (docker 路径)。
+
+    容器内 feed 代理必须指向宿主机 Clash (host.docker.internal)，而非容器自身。
+    """
+    monkeypatch.setenv("PROXY_HOST", "host.docker.internal")
+    monkeypatch.setenv("PROXY_PORT", "7890")
+    captured = {}
+
+    class FakeFeed:
+        def __init__(self, symbols, **kw):
+            captured.update(kw)
+
+        def start(self):
+            pass
+
+        def backfill(self, limit):
+            pass
+
+    with patch("shared.runner.PreflightChecker") as MockPreflight, \
+         patch("shared.runner.PositionReconciler") as MockReconciler, \
+         patch("shared.runner.MarketDataFeed", FakeFeed):
+        MockPreflight.return_value.run_all.return_value = {
+            "assets": [{"walletBalance": "10000"}],
+        }
+        r = SystemRunner()
+        with patch.object(r, "_fetch_step_sizes", return_value={"BTCUSDT": 0.001}):
+            r.initialize()
+        assert captured["proxy_host"] == "host.docker.internal"
+        assert captured["proxy_port"] == 7890
+        # gateway 未显式传 proxy 时同样读环境变量
+        assert r.gateway.proxies["https"] == "http://host.docker.internal:7890"

@@ -16,9 +16,10 @@ services:
       # 容器内连 redis 服务（覆盖 .env 中的 redis://localhost:6379）
       REDIS_URL: redis://redis:6379
       # 容器访问宿主机 Clash 代理（Windows Docker Desktop 自动解析
-      # host.docker.internal；extra_hosts 兜底 Linux Docker）
-      # 注意：当前代码尚未读取 PROXY_HOST（server.py/runner.py 硬编码 127.0.0.1:7897）
+      # host.docker.internal；extra_hosts 兜底 Linux Docker）；
+      # 代码统一读取 PROXY_HOST/PROXY_PORT，缺省 127.0.0.1:7897
       PROXY_HOST: host.docker.internal
+      PROXY_PORT: "7897"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

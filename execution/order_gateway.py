@@ -64,13 +64,20 @@ class OrderGateway:
     BASE_URL_TESTNET = "https://testnet.binancefuture.com"
     BASE_URL_LIVE = "https://fapi.binance.com"
 
-    def __init__(self, testnet: bool = True, proxy_host: str = "127.0.0.1",
-                 proxy_port: int = 7897):
+    def __init__(self, testnet: bool = True, proxy_host: Optional[str] = None,
+                 proxy_port: Optional[int] = None):
         self.testnet = testnet
         self.api_key = os.environ.get("BINANCE_API_KEY", "")
         self.api_secret = os.environ.get("BINANCE_API_SECRET", "")
         self.base_url = self.BASE_URL_TESTNET if testnet else self.BASE_URL_LIVE
+        # 代理地址统一读环境变量（缺省 127.0.0.1:7897 本机直跑；Docker 路径由
+        # PROXY_HOST=host.docker.internal 指向宿主机 Clash），与 feed.py 一致
+        if proxy_host is None:
+            proxy_host = os.environ.get("PROXY_HOST", "127.0.0.1")
+        if proxy_port is None:
+            proxy_port = int(os.environ.get("PROXY_PORT", "7897"))
         # 显式代理（与 feed.py 一致），不依赖 Windows 系统代理设置
+        # testnet 与实盘走同一通道，确保测试链路与生产一致
         self.proxies = {
             "http": f"http://{proxy_host}:{proxy_port}",
             "https": f"http://{proxy_host}:{proxy_port}",
