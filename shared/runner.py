@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -91,6 +92,8 @@ class SystemRunner:
             "start_time": time.time(),
         }
         self._last_data_ts: dict = {}
+        self._circuit_breaker = None  # 熔断态: "emergency_stop" / None (kill switch)
+        self._command_thread: Optional[threading.Thread] = None
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -156,6 +159,18 @@ class SystemRunner:
         self.heartbeat = HeartbeatPublisher(self.event_bus, instance=self.instance)
         self.heartbeat.start()
 
+        # 订阅 command 流 (dashboard 控制台 → emergency_stop / resume kill switch)
+        if self.event_bus is not None:
+            def _on_command_event(event):
+                self._handle_command(event.data)
+
+            self._command_thread = threading.Thread(
+                target=self.event_bus.run_consumer,
+                args=("command", f"systrader-{self.instance}", _on_command_event, 5, 100),
+                daemon=True,
+            )
+            self._command_thread.start()
+
         # 回填历史数据 + 记录数据时间戳
         self.feed.backfill(limit=200)
         for sym in self.symbols:
@@ -212,6 +227,11 @@ class SystemRunner:
 
     def _execute_signal(self, signal):
         """风控 → 下单 (OrderManager 完整链路: 入场 LIMIT + 止损/止盈条件单)。"""
+        if self._circuit_breaker:
+            logger.warning("Circuit breaker active (%s) — signal rejected",
+                           self._circuit_breaker)
+            self.stats["risk_rejected"] += 1
+            return
         # 持仓去重: 已有该 symbol 持仓或 PENDING 入场单时跳过, 避免叠单
         if signal.symbol in self.portfolio.positions:
             logger.info("SKIP %s: 已有持仓, 跳过重复开仓", signal.symbol)
@@ -266,6 +286,32 @@ class SystemRunner:
         except Exception as e:
             self.stats["orders_failed"] += 1
             logger.error("ORDER EXCEPTION %s: %s", signal.symbol, e)
+
+    # ─── Kill switch / 熔断 ───
+
+    def _handle_command(self, data: dict):
+        """command 事件流处理: emergency_stop 熔断 / resume 恢复。
+
+        pause 命令留后续任务处理, 本方法不处理也不报错。
+        """
+        command = data.get("command", "")
+        if command == "emergency_stop":
+            self._circuit_breaker = "emergency_stop"
+            logger.warning("EMERGENCY STOP — 停止下单")
+            self._cancel_active_orders()
+        elif command == "resume":
+            self._circuit_breaker = None
+            logger.info("Circuit breaker cleared — trading resumed")
+
+    def _cancel_active_orders(self):
+        """撤销全部活跃订单（OrderManager 无撤销接口时退化为仅停止新单）。"""
+        try:
+            active = getattr(self.orders, "active_orders", []) or []
+            for order in active:
+                if getattr(order, "state", None) and order.state.value not in ("FILLED", "CANCELED"):
+                    self.gateway.cancel_order(order.symbol, order.order_id)
+        except Exception as e:
+            logger.error("Cancel active orders failed: %s", e)
 
     # ─── 健康监控 ───
 

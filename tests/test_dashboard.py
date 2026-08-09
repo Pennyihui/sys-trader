@@ -83,11 +83,21 @@ class TestCreateApp:
         assert app is not None
 
     def test_websocket_command_publishes(self):
-        """dashboard 命令 → command 事件流。"""
+        """dashboard 命令 → command 事件流 (发布成功返回 True)。"""
         from dashboard.server import handle_ws_command
         bus = MagicMock()
-        handle_ws_command(bus, "emergency_stop")
+        bus.publish.return_value = "id-1"
+        ok = handle_ws_command(bus, "emergency_stop")
+        assert ok is True
         bus.publish.assert_called_once_with("command", {"command": "emergency_stop"})
+
+    def test_websocket_command_publish_failure_returns_false(self):
+        """publish 失败 (Redis down) / 无总线 → False, WS 端回发 ack 失败。"""
+        from dashboard.server import handle_ws_command
+        bus = MagicMock()
+        bus.publish.return_value = ""  # EventBus.publish 失败返回 ""
+        assert handle_ws_command(bus, "emergency_stop") is False
+        assert handle_ws_command(None, "emergency_stop") is False
 
     def test_create_app_with_custom_collector(self, monkeypatch):
         """传入自定义 collector 时不触发自动装配（UnboundLocalError 回归）。"""

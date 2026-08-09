@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 PROXY_POOL_API = "http://127.0.0.1:8765"
 
 
-def handle_ws_command(event_bus, msg: str):
-    """dashboard 命令 → command 事件流（kill switch 接线）。"""
-    if event_bus is not None:
-        event_bus.publish("command", {"command": msg})
+def handle_ws_command(event_bus, msg: str) -> bool:
+    """dashboard 命令 → command 事件流（kill switch 接线）。返回是否成功发布。"""
+    if event_bus is None:
+        return False
+    return bool(event_bus.publish("command", {"command": msg}))
 
 
 class DashboardServer:
@@ -49,7 +50,14 @@ class DashboardServer:
                     msg = await ws.receive_text()
                     if msg in ("pause", "resume", "emergency_stop"):
                         logger.info("[Dashboard] command: %s", msg)
-                        handle_ws_command(self.event_bus, msg)
+                        ok = handle_ws_command(self.event_bus, msg)
+                        if not ok:
+                            await ws.send_json({"type": "command_ack", "command": msg,
+                                                "ok": False,
+                                                "error": "publish failed (Redis down?)"})
+                        else:
+                            await ws.send_json({"type": "command_ack", "command": msg,
+                                                "ok": True})
             except WebSocketDisconnect:
                 pass
             finally:
