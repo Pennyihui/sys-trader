@@ -76,37 +76,37 @@ class TestRiskChain:
 
 @pytest.mark.unit
 def test_publishes_approved_and_rejected():
-    bus = MagicMock()
-    chain = MiddlewareChain(event_bus=bus)
     sig = Signal(symbol="BTCUSDT", direction="LONG", conviction=0.8,
                  entry_price=64000.0, stop_loss=62000.0, take_profit=68000.0)
     portfolio = PortfolioTracker(initial_equity=10000.0)
 
-    # 空链 → approved
+    # 空链 → 恰好发布 1 次 signal.approved
+    bus1 = MagicMock()
+    chain = MiddlewareChain(event_bus=bus1)
     chain.process(sig, portfolio)
-    streams = [c[0][0] for c in bus.publish.call_args_list]
-    assert "signal.approved" in streams
-    # approved payload: instance/symbol/direction/modifications
-    approved = [c for c in bus.publish.call_args_list if c[0][0] == "signal.approved"][0]
-    payload = approved[0][1]
+    assert bus1.publish.call_count == 1
+    stream, payload = bus1.publish.call_args[0]
+    assert stream == "signal.approved"
     assert payload["instance"] == "live"
     assert payload["symbol"] == "BTCUSDT"
     assert payload["direction"] == "LONG"
+    assert payload["signal_id"] == sig.signal_id
     assert isinstance(payload["modifications"], dict)
 
-    # 拒绝中间件 → rejected
+    # 拒绝中间件 → 恰好发布 1 次 signal.rejected（互斥：不含 approved）
     class Rejecter:
         def process(self, signal, portfolio):
             return MiddlewareResult(rejected=True, reason="test")
 
+    bus2 = MagicMock()
+    chain = MiddlewareChain(event_bus=bus2)
     chain.add(Rejecter())
     chain.process(sig, portfolio)
-    streams = [c[0][0] for c in bus.publish.call_args_list]
-    assert "signal.rejected" in streams
-    # rejected payload: instance/symbol/direction/reason
-    rejected = [c for c in bus.publish.call_args_list if c[0][0] == "signal.rejected"][0]
-    payload = rejected[0][1]
+    assert bus2.publish.call_count == 1
+    stream, payload = bus2.publish.call_args[0]
+    assert stream == "signal.rejected"
     assert payload["instance"] == "live"
     assert payload["symbol"] == "BTCUSDT"
     assert payload["direction"] == "LONG"
     assert payload["reason"] == "test"
+    assert payload["signal_id"] == sig.signal_id

@@ -40,6 +40,7 @@ class MiddlewareChain:
                     self._event_bus.publish("signal.rejected", {
                         "instance": self.instance, "symbol": signal.symbol,
                         "direction": signal.direction, "reason": result.reason,
+                        "signal_id": signal.signal_id,
                     })
                 return result
             if result.signal is not None:
@@ -50,5 +51,6 @@ class MiddlewareChain:
             self._event_bus.publish("signal.approved", {
                 "instance": self.instance, "symbol": signal.symbol,
                 "direction": signal.direction, "modifications": modifications,
+                "signal_id": signal.signal_id,
             })
         return MiddlewareResult(rejected=False, signal=current_signal, modifications=modifications)
