@@ -12,13 +12,15 @@ def align_qty_to_step(qty: float, step_size: float, min_qty: float, max_qty: flo
     统一 round(qty, 4) 会导致 ETH/SOL 精度超限失败。
 
     对齐策略: clamp 到 [min_qty, max_qty] 后向下取整；
-    若向下取整跌破 min_qty（名义价值保底），则向上取整到下一个 step。
+    若向下取整跌破 min_qty（名义价值保底），则向上取整到下一个 step，
+    且向上取整结果 clamp 到 max_qty（窗口内无 step 整数倍时保 max）；
+    step_size 缺失/≤0 时退化为 4 位小数 round（与原 stability_test 行为一致）。
     """
     if not step_size or step_size <= 0:
-        return min(max(qty, min_qty), max_qty)
+        return round(min(max(qty, min_qty), max_qty), 4)
     q = min(max(qty, min_qty), max_qty)
     steps = round(q / step_size, 8)  # 消浮点误差: 0.0015/0.0001 → 15.0
     floored = math.floor(steps) * step_size
     if floored >= min_qty:
         return round(floored, 8)
-    return round(math.ceil(steps) * step_size, 8)
+    return min(round(math.ceil(steps) * step_size, 8), max_qty)

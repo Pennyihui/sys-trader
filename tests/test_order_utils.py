@@ -31,3 +31,11 @@ class TestAlignQtyToStep:
 
     def test_no_step_size_passthrough(self):
         assert align_qty_to_step(5.0, 0.0, 1.0, 100.0) == 5.0
+
+    def test_no_step_size_rounds_4dp(self):
+        """step<=0 退化路径保持 4 位小数舍入（与原 stability_test round(qty,4) 一致）"""
+        assert align_qty_to_step(0.00262451, 0.0, 0.001, 1.0) == 0.0026
+
+    def test_ceil_clamped_to_max(self):
+        """[min_qty, max_qty] 窗口内无 step 整数倍 → ceil 结果 clamp 到 max_qty"""
+        assert align_qty_to_step(0.058, 0.01, 0.055, 0.059) == 0.059
