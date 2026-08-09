@@ -5,16 +5,19 @@
 """
 
 import argparse
-import sys
+import logging
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from shared.config_loader import load_env
 from shared.logging import setup_logging
 from shared.runner import SystemRunner
 
 
 def main():
+    load_env()
     parser = argparse.ArgumentParser(description="稳定性测试 (testnet下单)")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT")
@@ -29,7 +32,6 @@ def main():
         runner.initialize()
         runner.run_forever()
     except Exception:
-        import logging
         logging.getLogger("stability").exception("Fatal error")
         sys.exit(1)
 
