@@ -122,6 +122,8 @@ def create_app(data_collector: Optional[DataCollector] = None, event_bus=None) -
             logger.warning("StateStore start failed (Redis down?): %s", e)
         feed.start()
         collector = DataCollector(state_store=store, feed=feed)
+    else:
+        collector = data_collector
     return DashboardServer(data_collector=collector, event_bus=event_bus).app
 
 

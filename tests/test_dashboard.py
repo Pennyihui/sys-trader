@@ -88,3 +88,15 @@ class TestCreateApp:
         bus = MagicMock()
         handle_ws_command(bus, "emergency_stop")
         bus.publish.assert_called_once_with("command", {"command": "emergency_stop"})
+
+    def test_create_app_with_custom_collector(self, monkeypatch):
+        """传入自定义 collector 时不触发自动装配（UnboundLocalError 回归）。"""
+        from dashboard.server import create_app
+
+        def _boom(*a, **k):
+            raise AssertionError("auto-assembly ran despite custom collector")
+
+        monkeypatch.setattr("shared.config_loader.load_env", _boom)
+        collector = MagicMock()
+        app = create_app(data_collector=collector)
+        assert app is not None
