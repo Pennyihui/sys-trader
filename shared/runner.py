@@ -35,6 +35,7 @@ from risk.position_sizer import PositionSizer
 from shared.config_loader import load_env
 from shared.execution_mode import ExecutionMode, ExecutionModeManager
 from shared.idempotency import IdempotencyTracker
+from monitor.collector import MetricsCollector
 from shared.logging import setup_logging
 from shared.preflight import PreflightChecker
 from shared.reconciler import PositionReconciler
@@ -75,6 +76,7 @@ class SystemRunner:
         self.gateway: Optional[OrderGateway] = None
         self.idempotency: Optional[IdempotencyTracker] = None
         self.reconciler: Optional[PositionReconciler] = None
+        self.heartbeat: Optional["HeartbeatPublisher"] = None
         self.engine: Optional[SignalEngine] = None
         self.risk_chain: Optional[MiddlewareChain] = None
         self.orders: Optional[OrderManager] = None
@@ -147,6 +149,11 @@ class SystemRunner:
         # 持续对账
         self.reconciler = reconciler
         self.reconciler.start()
+
+        # 心跳发布线程: 周期读取 MetricsCollector 各模块心跳并发布 heartbeat 事件
+        from shared.heartbeat_publisher import HeartbeatPublisher
+        self.heartbeat = HeartbeatPublisher(self.event_bus, instance=self.instance)
+        self.heartbeat.start()
 
         # 回填历史数据 + 记录数据时间戳
         self.feed.backfill(limit=200)
@@ -417,6 +424,8 @@ class SystemRunner:
         last_snapshot = time.time()
         try:
             while True:
+                # 模块心跳: 主循环每轮标记 runner 存活
+                MetricsCollector.instance().heartbeat("runner")
                 time.sleep(5)
                 self._check_stall()
                 self._check_connections()
@@ -439,9 +448,8 @@ class SystemRunner:
             self.feed.stop()
         if self.idempotency:
             self.idempotency.close()
-        heartbeat = getattr(self, "heartbeat", None)
-        if heartbeat is not None:
-            heartbeat.stop()
+        if self.heartbeat:
+            self.heartbeat.stop()
         logger.info("Shutdown complete")
         sys.exit(0)
 

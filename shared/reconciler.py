@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
 from execution.order_gateway import OrderGateway
+from monitor.collector import MetricsCollector
 from portfolio.tracker import PortfolioTracker
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ class PositionReconciler:
 
     def _run(self):
         while not self._stop.is_set():
+            # 模块心跳: 每轮对账循环标记 reconciler 存活
+            MetricsCollector.instance().heartbeat("reconciler")
             try:
                 self.reconcile()
             except Exception as e:
