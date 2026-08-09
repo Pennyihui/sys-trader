@@ -1,4 +1,6 @@
 import pytest
+from unittest.mock import MagicMock
+
 from signal_engine.engine import SignalEngine, Signal
 
 
@@ -29,3 +31,30 @@ class TestSignalEngine:
         ohlcv = []
         signal = self.engine.run("BTCUSDT", "1w", ohlcv)
         assert signal is None
+
+    def test_publishes_signal_generated_with_instance(self):
+        bus = MagicMock()
+        engine = SignalEngine(event_bus=bus, instance="paper")
+        strat = MagicMock()
+        strat.timeframe = "15m"
+        strat.analyze.return_value = Signal(
+            symbol="BTCUSDT", direction="LONG", conviction=0.8,
+            entry_price=64000.0, stop_loss=62000.0, take_profit=68000.0)
+        engine.strategy = strat
+        engine.run("BTCUSDT", "15m", [{"close": 64000.0}])
+        bus.publish.assert_called_once()
+        stream, payload = bus.publish.call_args[0]
+        assert stream == "signal.generated"
+        assert payload["instance"] == "paper"
+        assert payload["symbol"] == "BTCUSDT"
+
+    def test_no_event_bus_is_silent(self):
+        engine = SignalEngine()
+        strat = MagicMock()
+        strat.timeframe = "15m"
+        strat.analyze.return_value = Signal(
+            symbol="BTCUSDT", direction="LONG", conviction=0.8,
+            entry_price=64000.0, stop_loss=62000.0, take_profit=68000.0)
+        engine.strategy = strat
+        signal = engine.run("BTCUSDT", "15m", [{"close": 64000.0}])  # 不抛异常
+        assert signal is not None

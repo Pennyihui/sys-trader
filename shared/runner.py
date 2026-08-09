@@ -158,7 +158,10 @@ class SystemRunner:
 
     def _build_signal_chain(self) -> SignalEngine:
         """信号链: 按名称从 StrategyRegistry 取策略实例。"""
-        return SignalEngine(strategy=StrategyRegistry.get(self.strategy_name))
+        return SignalEngine(
+            strategy=StrategyRegistry.get(self.strategy_name),
+            event_bus=self.event_bus, instance=self.instance,
+        )
 
     def _build_risk_chain(self) -> MiddlewareChain:
         """风控链: 仓位 → 回撤 → 日亏损 → 集中度。"""
