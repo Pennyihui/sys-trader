@@ -61,3 +61,10 @@ class TestEventBus:
         assert parsed["stream"] == original.stream
         assert parsed["data"]["symbol"] == "ETHUSDT"
         assert parsed["data"]["qty"] == 0.5
+
+
+def test_publish_survives_redis_down(monkeypatch):
+    """Redis 不可用时 publish 不抛异常，返回空字符串。"""
+    bus = EventBus(redis_url="redis://127.0.0.1:1")  # 必然失败的端口
+    bus.redis.close()  # 强制断连
+    assert bus.publish("test.stream", {"k": "v"}) == ""

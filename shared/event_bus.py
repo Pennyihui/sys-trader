@@ -33,8 +33,12 @@ class EventBus:
     def publish(self, stream: str, data: dict) -> str:
         event = Event(stream=stream, data=data)
         payload = json.dumps({"event_id": event.event_id, "stream": event.stream, "timestamp": event.timestamp, "data": event.data})
-        msg_id = self.redis.xadd(self._key(stream), {"payload": payload}, maxlen=10000)
-        return msg_id
+        try:
+            msg_id = self.redis.xadd(self._key(stream), {"payload": payload}, maxlen=10000)
+            return msg_id
+        except Exception as e:
+            logger.warning("EventBus publish failed [%s]: %s", stream, e)
+            return ""
 
     def subscribe(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
         key = self._key(stream)
