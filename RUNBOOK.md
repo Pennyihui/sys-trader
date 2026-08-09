@@ -24,6 +24,15 @@
            └────────────────┘
 ```
 
+## 前置: 安装 Memurai
+
+Redis 兼容服务（EventBus/StateStore/Dashboard 依赖），默认 localhost:6379。
+安装与配置（含关闭持久化）见 [docs/redis-setup.md](docs/redis-setup.md)。
+
+```bash
+redis-cli ping   # → PONG 即就绪
+```
+
 ## 启动
 
 ```bash
@@ -36,6 +45,22 @@ python -m shared.runner
 # Dashboard
 cd dashboard/frontend && npm run dev
 ```
+
+### Dashboard 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| REDIS_URL | `redis://localhost:6379` | Redis 连接串（backend 启动时读） |
+| DASHBOARD_SYMBOLS | `BTCUSDT,ETHUSDT,SOLUSDT` | 行情 feed 订阅交易对（逗号分隔） |
+| DASHBOARD_INSTANCE | `live` | 只消费该 instance 的事件流 |
+
+### Dashboard 启动行为（import 副作用）
+
+`uvicorn dashboard.server:app`（或任意 `import dashboard.server`）在模块加载时即执行模块级
+`app = create_app()`：自动装配 EventBus（连 Redis）→ StateStore（6 个消费线程：
+position/order/signal/heartbeat 流）→ MarketDataFeed（4 条 Binance WS 行情线程），
+**启动即开始消费与连接**。Redis 不可用时 StateStore 启动失败被捕获（dashboard 降级运行、
+无实时状态），feed 线程仍会启动。
 
 ## 查看状态
 

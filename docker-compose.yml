@@ -1,11 +1,28 @@
 version: "3.9"
 
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
   backend:
     build: .
     ports:
       - "8000:8000"
     env_file: config/.env
+    environment:
+      # 容器内连 redis 服务（覆盖 .env 中的 redis://localhost:6379）
+      REDIS_URL: redis://redis:6379
+      # 容器访问宿主机 Clash 代理（Windows Docker Desktop 自动解析
+      # host.docker.internal；extra_hosts 兜底 Linux Docker）
+      # 注意：当前代码尚未读取 PROXY_HOST（server.py/runner.py 硬编码 127.0.0.1:7897）
+      PROXY_HOST: host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis
     volumes:
       - ./data:/app/data
     restart: unless-stopped
