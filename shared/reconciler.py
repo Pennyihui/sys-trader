@@ -74,7 +74,12 @@ class PositionReconciler:
 
     def _run(self):
         while not self._stop.is_set():
-            self.reconcile()
+            try:
+                self.reconcile()
+            except Exception as e:
+                # feed 线程可能在迭代期间写 positions (open_position),
+                # 竞态异常不能杀死对账线程, 记日志后继续下一轮
+                logger.error("Reconciler: reconcile failed: %s", e)
             self._stop.wait(timeout=self.interval)
 
     def stop(self):

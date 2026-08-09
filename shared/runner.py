@@ -89,7 +89,6 @@ class SystemRunner:
             "start_time": time.time(),
         }
         self._last_data_ts: dict = {}
-        self._last_close_ts: dict = {}
 
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -174,17 +173,17 @@ class SystemRunner:
     # ─── 信号链: K线闭合 → 信号 → 风控 → 下单 ───
 
     def _on_kline_closed(self, symbol: str, timeframe: str, ohlcv):
-        """15m K线闭合 → 信号 → 风控 → 下单。"""
-        if timeframe != "15m":
+        """K线闭合 → 信号 → 风控 → 下单 (时间框架由策略决定)。"""
+        tf = getattr(getattr(self.engine, "strategy", None), "timeframe", "15m")
+        if timeframe != tf:
             return
         self.stats["kline_closes"] += 1
-        self._last_close_ts[symbol] = time.time()
         df = pd.DataFrame([{
             "open": k.open, "high": k.high, "low": k.low,
             "close": k.close, "volume": k.volume,
         } for k in ohlcv])
         try:
-            signal = self.engine.run(symbol, "15m", df.to_dict("records"))
+            signal = self.engine.run(symbol, tf, df.to_dict("records"))
             if signal is None:
                 return
             self.stats["signals"] += 1
@@ -197,6 +196,14 @@ class SystemRunner:
 
     def _execute_signal(self, signal):
         """风控 → 下单 (OrderManager 完整链路: 入场 LIMIT + 止损/止盈条件单)。"""
+        # 持仓去重: 已有该 symbol 持仓或 PENDING 入场单时跳过, 避免叠单
+        if signal.symbol in self.portfolio.positions:
+            logger.info("SKIP %s: 已有持仓, 跳过重复开仓", signal.symbol)
+            return
+        if any(o.symbol == signal.symbol and o.state == OrderState.PENDING
+               for o in self.orders.active_orders):
+            logger.info("SKIP %s: 已有 PENDING 入场单, 跳过重复开仓", signal.symbol)
+            return
         result = self.risk_chain.process(signal, self.portfolio)
         if result.rejected:
             self.stats["risk_rejected"] += 1
@@ -215,17 +222,24 @@ class SystemRunner:
                 signal.symbol, signal.direction, qty,
                 signal.entry_price, signal.stop_loss, signal.take_profit,
             )
-            # 成交判定: OrderManager 将 FILLED/NEW 均映射为 PENDING 状态，
-            # 仅 REJECTED/ERROR 表示下单失败
-            filled = [
-                o for o in orders
-                if o.state in (OrderState.FILLED, OrderState.PARTIALLY_FILLED, OrderState.PENDING)
-            ]
-            if not filled:
+            # 成功判定以入场单 (列表第 1 个) 的 state 为唯一判据:
+            # OrderManager 将 FILLED/NEW 均映射为 PENDING, 仅 REJECTED/ERROR 为失败
+            entry = orders[0] if orders else None
+            if entry is None or entry.state in (OrderState.REJECTED, OrderState.ERROR):
                 self.stats["orders_failed"] += 1
-                err = next((o.error for o in orders if o.error), "unknown")
+                err = entry.error if entry else "no orders returned"
                 logger.error("ORDER FAILED %s: %s", signal.symbol, err)
                 return
+            # 止损/止盈被拒: 单独告警, 不影响 orders_placed 统计
+            protection = [
+                o for o in orders[1:]
+                if o.state in (OrderState.REJECTED, OrderState.ERROR)
+            ]
+            if protection:
+                logger.warning(
+                    "SL/TP PROTECTION REJECTED %s: %s", signal.symbol,
+                    "; ".join(f"{o.order_type}={o.error}" for o in protection),
+                )
             self.stats["orders_placed"] += 1
             self.portfolio.open_position(Position(
                 symbol=signal.symbol, direction=signal.direction,
@@ -360,12 +374,13 @@ class SystemRunner:
     def _snapshot(self):
         elapsed = time.time() - self.stats["start_time"]
         prices = {sym: self.feed.get_last_price(sym) for sym in self.symbols}
-        connected = sum(1 for c in self.feed._conns if c.connected) if self.feed._conns else 0
+        conns = self.feed._conns if self.feed else []
+        connected = sum(1 for c in conns if c.connected)
         logger.info(
-            "SNAPSHOT t=%.0fm | prices=%s | ws=%d/4 | closes=%d | sig=%d rej=%d order=%d/%d | stalls=%d",
+            "SNAPSHOT t=%.0fm | prices=%s | ws=%d/%d | closes=%d | sig=%d rej=%d order=%d/%d | stalls=%d",
             elapsed / 60,
             {k: (round(v, 1) if v else None) for k, v in prices.items()},
-            connected,
+            connected, len(conns),
             self.stats["kline_closes"], self.stats["signals"], self.stats["risk_rejected"],
             self.stats["orders_placed"], self.stats["orders_failed"],
             self.stats["stalls"],
