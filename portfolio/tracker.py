@@ -16,7 +16,7 @@ class Position:
 
 
 class PortfolioTracker:
-    def __init__(self, initial_equity: float = 0.0):
+    def __init__(self, initial_equity: float = 0.0, event_bus=None):
         self.total_equity: float = initial_equity
         self.available_balance: float = initial_equity
         self.peak_equity: float = initial_equity
@@ -26,6 +26,12 @@ class PortfolioTracker:
         self.trade_count_today: int = 0
         self.consecutive_losses: int = 0
         self._last_reset_day: int = datetime.now(timezone.utc).day
+        self.event_bus = event_bus  # 事件总线注入（可选，None 时静默跳过）
+
+    def _publish(self, data: dict):
+        """发布 position.changed 事件；未注入 event_bus 时静默跳过。"""
+        if self.event_bus is not None:
+            self.event_bus.publish("position.changed", data)
 
     def _maybe_reset_daily(self):
         today = datetime.now(timezone.utc).day
@@ -40,11 +46,13 @@ class PortfolioTracker:
             self.available_balance = available_balance
         if total_equity > self.peak_equity:
             self.peak_equity = total_equity
+        self._publish({"event": "equity", "total_equity": total_equity, "available_balance": self.available_balance})
 
     def open_position(self, position: Position):
         self.positions[position.symbol] = position
         self.trade_count_today += 1
         self._maybe_reset_daily()
+        self._publish({"event": "open", "symbol": position.symbol, "direction": position.direction, "quantity": position.quantity, "entry_price": position.entry_price})
 
     def close_position(self, symbol: str, exit_price: float) -> float:
         pos = self.positions.pop(symbol, None)
@@ -62,6 +70,7 @@ class PortfolioTracker:
         if self.total_equity > self.peak_equity:
             self.peak_equity = self.total_equity
         self._maybe_reset_daily()
+        self._publish({"event": "close", "symbol": symbol, "exit_price": exit_price, "realized_pnl": pnl, "total_equity": self.total_equity})
         return pnl
 
     def unrealized_pnl(self, symbol: str, mark_price: float) -> float:

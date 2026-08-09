@@ -99,7 +99,7 @@ class SystemRunner:
 
     def initialize(self):
         self.gateway = OrderGateway(testnet=self.testnet)
-        self.portfolio = PortfolioTracker()
+        self.portfolio = PortfolioTracker(event_bus=self.event_bus)
         # 注入优先：测试/嵌入式场景可预置 feed，仍强制接线 K线闭合回调
         if self.feed is None:
             self.feed = MarketDataFeed(

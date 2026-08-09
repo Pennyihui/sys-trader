@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 from portfolio.tracker import PortfolioTracker, Position
 
 
@@ -63,3 +64,21 @@ class TestPortfolioTracker:
         self.tracker.open_position(pos)
         self.tracker.close_position("BTCUSDT", 63000.0)
         assert self.tracker.daily_realized_pnl > 0
+
+
+@pytest.mark.unit
+def test_publishes_position_changed_on_open():
+    bus = MagicMock()
+    tracker = PortfolioTracker(initial_equity=1000.0, event_bus=bus)
+    tracker.open_position(Position("BTCUSDT", "LONG", 0.1, 64000.0, 3))
+    bus.publish.assert_called_once()
+    stream, payload = bus.publish.call_args[0]
+    assert stream == "position.changed"
+    assert payload["symbol"] == "BTCUSDT"
+    assert payload["direction"] == "LONG"
+
+
+@pytest.mark.unit
+def test_no_event_bus_is_silent():
+    tracker = PortfolioTracker(initial_equity=1000.0)
+    tracker.open_position(Position("BTCUSDT", "LONG", 0.1, 64000.0, 3))  # 不抛异常
