@@ -72,3 +72,8 @@ class TestStateStore:
         assert self.store.margin_ratio == 1.0
         assert self.store.daily_pnl == 0.0
         assert self.store.drawdown == 0.0
+
+    def test_stop_does_not_kill_shared_bus(self):
+        """stop() 只 join 本实例线程，不调用共享 bus.stop()（Task 12 地雷回归）。"""
+        self.store.stop()
+        self.bus.stop.assert_not_called()

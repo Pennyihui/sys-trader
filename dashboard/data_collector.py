@@ -23,7 +23,13 @@ class DataCollector:
         positions = []
         for symbol, pos in self.state.positions.items():
             mark = self.feed.get_mark_price(symbol) or pos.get("mark_price") or 0.0
-            upnl = pos.get("unrealized_pnl", 0.0)
+            # 生产 payload（position.changed open）不含 unrealized_pnl，
+            # 有行情时实时计算；无行情时回退 payload 值（保持测试兼容）。
+            entry = pos.get("entry_price") or 0.0
+            qty = pos.get("quantity") or 0.0
+            direction_mult = 1 if pos.get("direction") == "LONG" else -1
+            upnl = ((mark - entry) * qty * direction_mult
+                    if entry and mark else pos.get("unrealized_pnl", 0.0))
             positions.append({
                 "symbol": symbol,
                 "direction": pos.get("direction"),

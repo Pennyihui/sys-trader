@@ -36,6 +36,28 @@ class TestDataCollector:
         assert data["position_count"] == 1
         assert data["positions"][0]["unrealized_pnl"] == 100.0
 
+    def test_unrealized_pnl_computed_from_mark(self):
+        """真实 open payload（无 unrealized_pnl 字段）→ collect 时按 mark 实时计算。"""
+        self.state.positions = {"BTCUSDT": {
+            "symbol": "BTCUSDT", "direction": "LONG", "quantity": 0.1,
+            "entry_price": 63000.0, "instance": "live"}}
+        self.feed.get_mark_price.return_value = 65000.0
+        data = self.collector.collect()
+        assert data["positions"][0]["unrealized_pnl"] == 200.0  # (65000-63000)*0.1
+
+    def test_open_event_to_collect_position_count(self):
+        """真实 open payload 走 StateStore → collect 出现持仓（含实时 upnl）。"""
+        from dashboard.state_store import StateStore
+        from shared.event_bus import Event
+        store = StateStore(event_bus=MagicMock(), instance_filter="live")
+        store._handle(Event(stream="position.changed", data={
+            "event": "open", "symbol": "BTCUSDT", "direction": "LONG",
+            "quantity": 0.1, "entry_price": 63000.0, "instance": "live"}))
+        collector = DataCollector(state_store=store, feed=self.feed)
+        data = collector.collect()
+        assert data["position_count"] == 1
+        assert data["positions"][0]["unrealized_pnl"] == 100.0  # (64000-63000)*0.1
+
     def test_empty_positions_returns_empty_list(self):
         self.state.positions = {}
         data = self.collector.collect()

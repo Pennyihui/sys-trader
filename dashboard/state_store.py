@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from typing import Dict, List, Optional
 
 from shared.event_bus import EventBus
@@ -43,8 +44,19 @@ class StateStore:
         logger.info("StateStore consuming %d streams", len(STREAMS))
 
     def stop(self):
-        if hasattr(self.bus, "stop"):
-            self.bus.stop()
+        """仅 join 本实例的消费线程，不触碰共享 bus。
+
+        注意：bus.stop() 会停掉 EventBus 上所有消费者——Task 12 注入
+        共享 EventBus 后调用即杀全系统消费者，故这里不调用。消费线程是
+        daemon，join 超时后随进程退出；per-consumer 优雅停止留待后续。
+        """
+        deadline = time.time() + 3
+        for t in self._threads:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            t.join(timeout=remaining)
+        self._threads.clear()
 
     def _should_accept(self, data: dict) -> bool:
         inst = data.get("instance", "live")
