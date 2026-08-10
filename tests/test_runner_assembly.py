@@ -185,3 +185,15 @@ def test_risk_per_trade_parameterized():
     """risk_per_trade 构造参数生效 (实盘分级 D 阶段旋钮 0.002→0.005→0.010→0.015)。"""
     r = SystemRunner(risk_per_trade=0.005)
     assert r.risk_per_trade == 0.005
+
+
+@pytest.mark.unit
+def test_hours_zero_runs_forever():
+    r = SystemRunner(hours=0)
+    assert r.hours == 0  # 生产模式无限运行
+
+
+@pytest.mark.unit
+def test_hours_positive_bounds_run():
+    r = SystemRunner(hours=168)
+    assert r.hours == 168  # soak 模式 7 天

@@ -97,6 +97,42 @@ logs/
 tail -f logs/systrader.log
 ```
 
+## 稳定性测试（soak）
+
+```bash
+# testnet 7 天 soak（统一装配）
+python tools/stability_test.py --hours 168
+
+# 并行健康监控（每小时 RSS + 错误计数）
+python tools/soak_watchdog.py --log logs/systrader.log --out logs/soak_metrics.csv
+```
+
+### 验收标准（C 阶段）
+
+- 7 天无意外错误（soak_metrics.csv 错误计数无异常尖峰）
+- 无风控熔断触发（日志无 RISK REJECTED 熔断类）
+- 对账零漂移（reconciler 无 drift 告警）
+- 内存曲线平稳（RSS 波动 < 阈值，无持续增长趋势）
+
+### 实盘分级（D 阶段，验收标准）
+
+| 级 | risk_per_trade | 时长 | 验收 |
+|---|---|---|---|
+| 1 | 0.002 | 7 天 | 无重大事故 + 指标与 testnet 一致 ±20% |
+| 2 | 0.005 | 7 天 | 同上 |
+| 3 | 0.010 | 7 天 | 同上 |
+| 4 | 0.015（设计值） | 持续 | 同上 |
+
+```bash
+python -m shared.runner --risk-per-trade 0.002 --execution-mode live
+```
+
+### 影子交易（B 阶段）
+
+双实例运行（live 小仓位 + paper 模拟同参数），ShadowMonitor 比对：
+- 验收：信号对齐 ≥95% + 逐笔滑点/填充率记录 + 1 周无系统性偏差
+- 工具：python tools/shadow_monitor.py（record API + JSON 报告；实时订阅接线为后续增强）
+
 ## 常见问题
 
 | 问题 | 检查 | 解决 |
