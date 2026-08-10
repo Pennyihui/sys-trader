@@ -9,9 +9,11 @@ signal.generated 事件带 instance 标识 — Task 7 埋点）:
   实例 A: python -m shared.runner --instance live --execution-mode live --risk-per-trade 0.002 --hours 168
   实例 B: python -m shared.runner --instance paper --execution-mode paper --risk-per-trade 0.002 --hours 168
 
-事件 payload 形状（signal_engine/engine.py 埋点）:
-  signal.generated: {symbol, direction, entry_price, stop_loss, take_profit, signal_id, ...}
-  order.filled:     {symbol, price, qty, signal_id, ...}
+事件 payload 形状:
+  signal.generated（signal_engine/engine.py 埋点）: {instance, symbol, direction,
+    conviction, entry_price, stop_loss, take_profit, signal_id, strategy} — 带 signal_id
+  order.filled（execution/order_manager.py 埋点）: {instance, symbol, side,
+    order_type, status, quantity, price, order_id, error} — 无 signal_id
 
 接线说明: 实时订阅 EventBus 消费事件 → record_signal/record_fill 的接线（StateStore 式）
 留后续任务；本期以 record_signal/record_fill 接口 + save_report 落盘 JSON 报告为准。
@@ -26,8 +28,10 @@ signal.generated 事件带 instance 标识 — Task 7 埋点）:
     避免只比 live 侧导致 paper 侧的"幽灵信号"被忽略。
 
 执行配对语义（防跨 symbol 假滑点）:
-  - 优先按 signal_id 配对（live/paper 各自 {signal_id: price} 映射，取交集）；
-  - 其余按 symbol 分组、组内按序配对；
+  - 当前 order.filled payload 不含 signal_id（order_manager 埋点只有
+    instance/symbol/side/order_type/status/quantity/price/order_id/error），
+    故按 signal_id 配对仅在 producer 补齐 signal_id 后生效；
+    当前实际退化为按 symbol 分组、组内按序配对；
   - 任一侧 price<=0 的配对跳过；samples = 实际参与滑点计算的样本数。
 """
 
