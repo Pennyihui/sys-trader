@@ -16,18 +16,25 @@ signal.generated 事件带 instance 标识 — Task 7 埋点）:
 接线说明: 实时订阅 EventBus 消费事件 → record_signal/record_fill 的接线（StateStore 式）
 留后续任务；本期以 record_signal/record_fill 接口 + save_report 落盘 JSON 报告为准。
 
-匹配语义:
-  - 信号对齐按 "优先 signal_id，无 signal_id 时退回 symbol+direction" 匹配。
-    signal_id 是跨事件流（signal.generated ↔ order.filled）的唯一关联键（Task 7），
-    两实例收到同一 signal_id 即视为同一信号，方向一致。
+信号匹配语义（按 signal_id 有无分流，杜绝单条 paper 信号满足多条 live 信号）:
+  - 有 signal_id: live 按 id 匹配 paper id 集合，消耗式匹配（set.remove）——
+    同一 paper 信号最多满足一个 live 信号，防重复 id 虚增比率、隐藏 ghost。
+  - 无 signal_id: 退回 (symbol, direction) fallback 集合，且只对无 id 的
+    paper 记录生效（有 id 的 paper 记录只走 id 匹配，不被 fallback 双计）；
+    fallback 不消耗——无 id 时 (symbol, direction) 是唯一身份，重复记录无法区分。
   - 对齐率 = 匹配数 / max(live 数, paper 数): 任一实例多出的未匹配信号计入惩罚，
     避免只比 live 侧导致 paper 侧的"幽灵信号"被忽略。
+
+执行配对语义（防跨 symbol 假滑点）:
+  - 优先按 signal_id 配对（live/paper 各自 {signal_id: price} 映射，取交集）；
+  - 其余按 symbol 分组、组内按序配对；
+  - 任一侧 price<=0 的配对跳过；samples = 实际参与滑点计算的样本数。
 """
 
 import json
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -52,61 +59,91 @@ class ShadowMonitor:
     def alignment_ratio(self) -> float:
         """双实例信号对齐率（0~1，无 live 信号时视为 1.0 不判失败）。
 
-        优先按 signal_id 匹配（更精确，Task 7 埋点），无 signal_id 时退回
-        (symbol, direction) 匹配。对齐率 = 匹配数 / max(live 数, paper 数)，
-        未匹配的多余信号（任一侧）计入惩罚。
+        按 (signal_id 有无) 分流匹配，杜绝单条 paper 信号满足多条 live 信号:
+          - 有 id: 消耗式匹配 paper id 集合（set.remove，防重复 id 双计）；
+          - 无 id: 只对无 id 的 paper 记录做 (symbol, direction) fallback。
+        对齐率 = 匹配数 / max(live 数, paper 数)，未匹配的多余信号（任一侧）计入惩罚。
         """
         with self._lock:
             live = self.signals["live"]
             paper = self.signals["paper"]
             if not live:
                 return 1.0
+            # paper 按 (signal_id 有无) 分流
             paper_ids = {s.get("signal_id") for s in paper if s.get("signal_id")}
-            paper_set = {(s.get("symbol"), s.get("direction")) for s in paper}
+            paper_fallback = {
+                (s.get("symbol"), s.get("direction"))
+                for s in paper if not s.get("signal_id")
+            }
             matched = 0
             for s in live:
                 sid = s.get("signal_id")
                 if sid:
                     if sid in paper_ids:
+                        paper_ids.remove(sid)  # 消耗式: 一条 paper 只满足一条 live
                         matched += 1
-                elif (s.get("symbol"), s.get("direction")) in paper_set:
+                elif (s.get("symbol"), s.get("direction")) in paper_fallback:
+                    # fallback 不消耗: 无 id 时 (symbol, direction) 是唯一身份
                     matched += 1
             return matched / max(len(live), len(paper))
 
     def execution_quality(self) -> dict:
-        """逐笔执行质量：live 成交价 vs paper 成交价滑点（bps，按序配对）。
+        """逐笔执行质量：live 成交价 vs paper 成交价滑点（bps）。
 
-        slippage_bps = (live_price - paper_price) / paper_price * 10000，逐笔取均值。
-        fill_rate = 可配对笔数 / 两实例成交笔数较大者。无成交样本时各字段为 None。
+        配对规则: 优先按 signal_id 精确配对（取两实例 id 交集）；未配上的
+        （无 id 或 id 未交集）按 symbol 分组、组内按序配对，杜绝跨 symbol 假滑点。
+        任一侧 price<=0 的配对跳过。slippage_bps 为滑点均值；
+        fill_rate = 配对笔数 / 两实例成交笔数较大者；samples = 实际参与
+        滑点计算的样本数（与 slippage 样本一致）。无样本时各字段为 None。
         """
         with self._lock:
             live = self.fills["live"]
             paper = self.fills["paper"]
             if not live or not paper:
                 return {"slippage_bps": None, "fill_rate": None, "samples": 0}
-            pairs = min(len(live), len(paper))
-            if pairs == 0:
+
+            # 1) 按 signal_id 精确配对
+            live_by_id = {f.get("signal_id"): f for f in live if f.get("signal_id")}
+            paper_by_id = {f.get("signal_id"): f for f in paper if f.get("signal_id")}
+            paired_ids = set(live_by_id) & set(paper_by_id)
+            pairs = [(live_by_id[sid], paper_by_id[sid]) for sid in paired_ids]
+
+            # 2) 其余（无 id 或 id 未交集）按 symbol 分组、组内按序配对
+            live_rest = [f for f in live if f.get("signal_id") not in paired_ids]
+            paper_rest = [f for f in paper if f.get("signal_id") not in paired_ids]
+            for sym in {f.get("symbol") for f in live_rest} & {f.get("symbol") for f in paper_rest}:
+                live_sym = [f for f in live_rest if f.get("symbol") == sym]
+                paper_sym = [f for f in paper_rest if f.get("symbol") == sym]
+                pairs.extend(zip(live_sym, paper_sym))
+
+            if not pairs:
                 return {"slippage_bps": None, "fill_rate": None, "samples": 0}
+
             slips = []
-            for i in range(pairs):
-                base = float(paper[i].get("price") or 0)
-                if base <= 0:
+            for live_fill, paper_fill in pairs:
+                lpx = float(live_fill.get("price") or 0)
+                ppx = float(paper_fill.get("price") or 0)
+                if lpx <= 0 or ppx <= 0:  # 任一侧价格无效 → 跳过该配对
                     continue
-                slips.append((float(live[i].get("price") or 0) - base) / base * 10000)
+                slips.append((lpx - ppx) / ppx * 10000)
             return {
                 "slippage_bps": round(sum(slips) / len(slips), 2) if slips else None,
-                "fill_rate": round(pairs / max(len(live), len(paper)), 2),
-                "samples": pairs,
+                "fill_rate": round(len(pairs) / max(len(live), len(paper)), 2),
+                "samples": len(slips),
             }
 
     def save_report(self, path: str):
         with self._lock:
+            live_count = len(self.signals["live"])
+            ratio = self.alignment_ratio()
             report = {
-                "alignment_ratio": round(self.alignment_ratio(), 4),
+                "alignment_ratio": round(ratio, 4),
+                "align_threshold": self.align_threshold,
                 "execution_quality": self.execution_quality(),
                 "signal_count": {k: len(v) for k, v in self.signals.items()},
                 "fill_count": {k: len(v) for k, v in self.fills.items()},
-                "pass": self.alignment_ratio() >= self.align_threshold,
+                # 空运行（无 live 信号）不做通过判定 → null；有样本才给出布尔
+                "pass": ratio >= self.align_threshold if live_count else None,
             }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
