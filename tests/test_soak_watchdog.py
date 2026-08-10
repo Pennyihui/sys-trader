@@ -1,4 +1,6 @@
 """soak_watchdog 测试。"""
+import os
+
 import pytest
 
 from tools.soak_watchdog import rss_mb, collect_metrics, count_errors, sample_and_append
@@ -17,6 +19,14 @@ class TestSoakWatchdog:
     def test_rss_mb_positive_with_psutil(self):
         pytest.importorskip("psutil")
         assert rss_mb() > 0
+
+    def test_rss_mb_with_pid(self):
+        pytest.importorskip("psutil")
+        assert rss_mb(os.getpid()) > 0
+
+    def test_rss_mb_invalid_pid_returns_zero(self):
+        """不存在的 pid → psutil.NoSuchProcess → 回退 0.0（无 psutil 时同路径）。"""
+        assert rss_mb(999999999) == 0.0
 
     def test_count_errors_missing_file(self):
         assert count_errors("no_such_file.log") == 0
