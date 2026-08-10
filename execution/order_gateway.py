@@ -3,6 +3,7 @@
 import os
 import hmac
 import hashlib
+import random
 import time
 import logging
 from dataclasses import dataclass
@@ -129,7 +130,10 @@ class OrderGateway:
                 body = {}
             if not self._is_business_retryable(resp, body) or attempt == self.retry_business_errors - 1:
                 return body
-            delay = (2 ** attempt) * self.retry_business_backoff
+            # 指数退避 + jitter（±10% 随机偏移），避免多实例同时重试打满限流窗口；
+            # backoff=0 时 jitter 也为 0（random * 0），测试可即时重试
+            delay = ((2 ** attempt) * self.retry_business_backoff
+                     + random.uniform(0, 0.1) * self.retry_business_backoff)
             logger.warning(
                 "Business error %s %s (attempt %d/%d, http=%d code=%s): retry in %.1fs",
                 method, endpoint, attempt + 1, self.retry_business_errors,
