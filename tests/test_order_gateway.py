@@ -156,10 +156,12 @@ class TestServerTimeSync:
         """sync 拿到 serverTime 偏移后，签名时间戳叠加偏移。"""
         import time as _time
         now = int(_time.time() * 1000)
+        server_time = {"value": None}
 
         def fake_get(url, **kwargs):
             # 第一次（sync）返回服务器时间 = 本机 + 5s；业务请求返回正常响应
             if "/fapi/v1/time" in url:
+                server_time["value"] = now + 5000
                 return self._resp(200, {"serverTime": now + 5000})
             return self._resp(200, {"orderId": 1, "status": "NEW"})
 
@@ -167,10 +169,11 @@ class TestServerTimeSync:
                    side_effect=fake_get) as mock_get:
             result = self.gw._request("GET", "/fapi/v2/account", {})
         assert result["orderId"] == 1
-        # 业务请求的 timestamp 应带 +5000ms 偏移（且 sync 只调了一次）
+        # 业务请求的 timestamp 应等于 sync 返回的服务器时间（±2s 容差，
+        # 基于实际 serverTime 而非预捕获 now，避免全量跑时执行延迟误判）
         _, kwargs = mock_get.call_args_list[-1]
         params = kwargs.get("params", {})
-        assert abs(params["timestamp"] - (now + 5000)) < 2000
+        assert abs(params["timestamp"] - server_time["value"]) < 2000
         assert self.gw._time_offset == 5000
 
     def test_sync_failure_degrades_to_zero(self):
