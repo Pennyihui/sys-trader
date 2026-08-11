@@ -174,7 +174,8 @@ class TestServerTimeSync:
         _, kwargs = mock_get.call_args_list[-1]
         params = kwargs.get("params", {})
         assert abs(params["timestamp"] - server_time["value"]) < 2000
-        assert self.gw._time_offset == 5000
+        # 偏移 ≈ +5s（毫秒级时序差允许 ±100ms：sync 内部重新取时）
+        assert 4900 <= self.gw._time_offset <= 5100
 
     def test_sync_failure_degrades_to_zero(self):
         """sync 网络失败 → 偏移退化为 0，业务请求仍正常（本机时间）。"""
