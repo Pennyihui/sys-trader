@@ -63,6 +63,12 @@ class TestOrderGatewayRequestRetry:
         os.environ["BINANCE_API_SECRET"] = "test_secret"
         self.gw = OrderGateway(testnet=True)
         self.gw.retry_business_backoff = 0.0  # 测试不等待
+        # 隔离服务器时钟校准：不消耗 requests mock 响应（sync 逻辑单独测）
+        self._sync_patch = patch.object(self.gw, "_sync_server_time")
+        self._sync_patch.start()
+
+    def teardown_method(self):
+        self._sync_patch.stop()
 
     @staticmethod
     def _resp(status_code, payload):
@@ -128,6 +134,79 @@ class TestOrderGatewayRequestRetry:
             result = self.gw._request("POST", "/fapi/v1/order", {})
         assert result["orderId"] == 44
         assert mock_post.call_count == 2
+
+
+class TestServerTimeSync:
+    """服务器时钟校准（-1021 根治，Task 20 补充）。"""
+
+    def setup_method(self):
+        os.environ["BINANCE_API_KEY"] = "test_key"
+        os.environ["BINANCE_API_SECRET"] = "test_secret"
+        self.gw = OrderGateway(testnet=True)
+        self.gw.retry_business_backoff = 0.0
+
+    @staticmethod
+    def _resp(status_code, payload):
+        r = MagicMock()
+        r.status_code = status_code
+        r.json.return_value = payload
+        return r
+
+    def test_offset_applied_to_signed_timestamp(self):
+        """sync 拿到 serverTime 偏移后，签名时间戳叠加偏移。"""
+        import time as _time
+        now = int(_time.time() * 1000)
+
+        def fake_get(url, **kwargs):
+            # 第一次（sync）返回服务器时间 = 本机 + 5s；业务请求返回正常响应
+            if "/fapi/v1/time" in url:
+                return self._resp(200, {"serverTime": now + 5000})
+            return self._resp(200, {"orderId": 1, "status": "NEW"})
+
+        with patch("execution.order_gateway.requests.get",
+                   side_effect=fake_get) as mock_get:
+            result = self.gw._request("GET", "/fapi/v2/account", {})
+        assert result["orderId"] == 1
+        # 业务请求的 timestamp 应带 +5000ms 偏移（且 sync 只调了一次）
+        _, kwargs = mock_get.call_args_list[-1]
+        params = kwargs.get("params", {})
+        assert abs(params["timestamp"] - (now + 5000)) < 2000
+        assert self.gw._time_offset == 5000
+
+    def test_sync_failure_degrades_to_zero(self):
+        """sync 网络失败 → 偏移退化为 0，业务请求仍正常（本机时间）。"""
+        import time as _time
+        now = int(_time.time() * 1000)
+
+        def fake_get(url, **kwargs):
+            if "/fapi/v1/time" in url:
+                raise requests.exceptions.ConnectionError("proxy down")
+            return self._resp(200, {"orderId": 2, "status": "NEW"})
+
+        with patch("execution.order_gateway.requests.get",
+                   side_effect=fake_get) as mock_get:
+            result = self.gw._request("GET", "/fapi/v2/account", {})
+        assert result["orderId"] == 2
+        assert self.gw._time_offset == 0
+        _, kwargs = mock_get.call_args_list[-1]
+        params = kwargs.get("params", {})
+        assert abs(params["timestamp"] - now) < 2000
+
+    def test_sync_cached_within_60s(self):
+        """60s 缓存内不重复 sync（只调一次 /fapi/v1/time）。"""
+        import time as _time
+        now = int(_time.time() * 1000)
+        self.gw._time_offset = 5000
+        self.gw._last_sync = _time.time()
+
+        def fake_get(url, **kwargs):
+            if "/fapi/v1/time" in url:
+                raise AssertionError("sync 不应在缓存期内被调用")
+            return self._resp(200, {"orderId": 3, "status": "NEW"})
+
+        with patch("execution.order_gateway.requests.get", side_effect=fake_get):
+            result = self.gw._request("GET", "/fapi/v2/account", {})
+        assert result["orderId"] == 3
 
     def test_non_json_200_body_returns_empty_immediately(self):
         """200 但 body 非 JSON（非重试条件）：返回 {}，不再触发外层重试。"""

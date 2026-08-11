@@ -87,12 +87,36 @@ class OrderGateway:
         # 网络异常仍由外层 @retrier 处理
         self.retry_business_errors = 3
         self.retry_business_backoff = 1.0
+        # 服务器时钟偏移校准（-1021 时间戳超窗的根治）：代理延迟尖峰时
+        # 重新签名只是刷新本机时间戳，若本机时钟与服务器偏差仍会超窗；
+        # 用 /fapi/v1/time 校准偏移（缓存 60s），签名时叠加
+        self._time_offset = 0
+        self._last_sync = 0.0
 
     def _sign(self, params: dict) -> str:
         query = urlencode(params)
         return hmac.new(
             self.api_secret.encode(), query.encode(), hashlib.sha256
         ).hexdigest()
+
+    def _sync_server_time(self):
+        """从 /fapi/v1/time 校准本机与服务器时钟偏移（Binance 官方推荐）。
+
+        -1021（timestamp outside recvWindow）的根治：代理延迟尖峰导致
+        本机时间戳超窗时，重试只能刷新本机时间，偏移依旧。校准后签名
+        时间戳叠加偏移，超窗概率大幅下降。失败时偏移退化 0（现状）。
+        """
+        try:
+            now = int(time.time() * 1000)
+            resp = requests.get(
+                f"{self.base_url}/fapi/v1/time", timeout=5, proxies=self.proxies
+            )
+            server = resp.json().get("serverTime")
+            if server:
+                self._time_offset = int(server) - now
+        except Exception as e:
+            logger.warning("Server time sync failed (fallback offset=0): %s", e)
+            self._time_offset = 0
 
     @staticmethod
     def _is_business_retryable(resp, body: dict) -> bool:
@@ -108,9 +132,13 @@ class OrderGateway:
         # 暂不引入 clientOrderId 幂等键（较大改动，另立待办）。
         url = f"{self.base_url}{endpoint}"
         headers = {"X-MBX-APIKEY": self.api_key}
+        # 60s 缓存内校准一次服务器时钟偏移（签名用），失败退化本机时间
+        if time.time() - self._last_sync > 60:
+            self._sync_server_time()
+            self._last_sync = time.time()
         for attempt in range(self.retry_business_errors):
             # 每次重试都重新签名：时间戳必须刷新，否则 -1021 不会自愈
-            params["timestamp"] = int(time.time() * 1000)
+            params["timestamp"] = int(time.time() * 1000) + self._time_offset
             params["signature"] = self._sign(params)
             if method == "POST":
                 resp = requests.post(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
