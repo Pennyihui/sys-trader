@@ -537,6 +537,8 @@ def main():
     args = parser.parse_args()
     load_env()
     setup_logging()
+    from shared.event_bus import EventBus
+    event_bus = EventBus(redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"))
     runner = SystemRunner(
         testnet=args.testnet,
         symbols=args.symbols.split(","),
@@ -545,6 +547,7 @@ def main():
         risk_per_trade=args.risk_per_trade,
         hours=args.hours,
         instance=args.instance,
+        event_bus=event_bus,
     )
     try:
         runner.initialize()
