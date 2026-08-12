@@ -162,8 +162,9 @@ class ProxyWatchdog:
             return False
         latency = result["latency_ms"]
         lat_txt = f"{latency:.0f} ms" if latency is not None else "探测失败（超时/连接错误）"
+        # [SysTrader] 前缀：钉钉机器人自定义关键词（大小写敏感），缺失会被 310000 拒绝
         msg = (
-            "[proxy-watchdog] Clash 代理持续超标，已触发节点切换\n"
+            "[SysTrader][proxy-watchdog] Clash 代理持续超标，已触发节点切换\n"
             f"连续 {self.bad_streak} 次探测异常，最近延迟: {lat_txt}\n"
             f"阈值: {self.threshold_ms} ms，切换: "
             f"{'成功' if switched else '失败（请手动处理）'}"

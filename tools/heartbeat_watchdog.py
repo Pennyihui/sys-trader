@@ -225,7 +225,12 @@ class HeartbeatWatchdog:
     # ── 告警 ──
 
     def _dispatch(self, message: str) -> bool:
-        """发送告警；notifier 为 None 时降级为 logger.warning（不崩溃）。"""
+        """发送告警；notifier 为 None 时降级为 logger.warning（不崩溃）。
+
+        消息统一加 [SysTrader] 前缀：钉钉机器人设置了自定义关键词
+        "SysTrader"（大小写敏感），不带前缀的消息会被 API 拒绝 (310000)。
+        """
+        message = f"[SysTrader] {message}"
         if self.notifier is None:
             logger.warning("HEARTBEAT WATCHDOG: %s", message)
             return False
