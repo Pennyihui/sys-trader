@@ -20,6 +20,7 @@ set "ROOT_DIR=%~dp0.."
 set "NSSM_EXE=%SCRIPT_DIR%proxy_pool\nssm.exe"
 rem Prefer absolute python (SYSTEM account lacks user PATH); fall back to PATH lookup
 set "PYTHON_EXE=python"
+if exist "E:\Anaconda3\python.exe" set "PYTHON_EXE=E:\Anaconda3\python.exe"
 if exist "C:\Users\Evan\anaconda3\python.exe" set "PYTHON_EXE=C:\Users\Evan\anaconda3\python.exe"
 set "SERVICE_NAME=SystraderService"
 set "SERVICE_CMD=-m shared.runner --execution-mode live --instance live"
