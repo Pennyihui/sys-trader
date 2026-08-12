@@ -5,10 +5,14 @@
   - 统一装配: SignalEngine (策略链) + MiddlewareChain (风控 4 件套) + OrderManager (执行层)
   - 15m K线闭合 → 信号 → 风控 → execute_signal 下单全链路
   - 数据停滞 / WS 断连检测 + 网络诊断
+  - 连续停滞判定 → 熔断停单 (--stall-strikes, 需手动 resume)
+  - PENDING 订单超时自动撤单 (--pending-timeout-minutes)
+  - 关键指标注册 MetricsCollector gauge, 经 heartbeat 发布供 watchdog 检测
 
 运行:
   python -m shared.runner --hours 24            # 限时 24h (testnet 真实下单)
   python -m shared.runner                       # 无限运行 (生产默认)
+  python -m shared.runner --stall-strikes 5 --pending-timeout-minutes 45  # 自定阈值
 """
 
 import argparse
@@ -63,7 +67,9 @@ class SystemRunner:
                  strategy_name: str = "scalping_15m",
                  execution_mode_name: str = "live",
                  risk_per_trade: float = 0.015, hours: int = 0,
-                 instance: str = "live", event_bus=None):
+                 instance: str = "live", event_bus=None,
+                 stall_strikes: int = 3,
+                 pending_timeout_minutes: int = 30):
         self.testnet = testnet
         self.symbols = symbols or ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         self.strategy_name = strategy_name
@@ -72,6 +78,8 @@ class SystemRunner:
         self.hours = hours  # 0 = 无限运行（生产）
         self.instance = instance
         self.event_bus = event_bus  # 事件总线注入（可选，None 时静默）
+        self.stall_strikes = stall_strikes  # 连续停滞判定次数达到后熔断停单 (Ops T5)
+        self.pending_timeout_minutes = pending_timeout_minutes  # PENDING 超时撤单 (Ops T5)
         self.feed: Optional[MarketDataFeed] = None
         self.portfolio: Optional[PortfolioTracker] = None
         self.gateway: Optional[OrderGateway] = None
@@ -92,6 +100,7 @@ class SystemRunner:
             "start_time": time.time(),
         }
         self._last_data_ts: dict = {}
+        self._stall_strikes: dict = {}  # symbol -> 连续停滞判定次数 (Ops T5)
         self._circuit_breaker = None  # 熔断态: "emergency_stop" / None (kill switch)
         self._command_thread: Optional[threading.Thread] = None
 
@@ -209,6 +218,8 @@ class SystemRunner:
         if timeframe != tf:
             return
         self.stats["kline_closes"] += 1
+        # Ops T5: 注册 gauge, 经 heartbeat payload 供 watchdog 检测 K线闭合停滞
+        MetricsCollector.instance().set_gauge("kline_closes", self.stats["kline_closes"])
         df = pd.DataFrame([{
             "open": k.open, "high": k.high, "low": k.low,
             "close": k.close, "volume": k.volume,
@@ -263,6 +274,8 @@ class SystemRunner:
             entry = orders[0] if orders else None
             if entry is None or entry.state in (OrderState.REJECTED, OrderState.ERROR):
                 self.stats["orders_failed"] += 1
+                MetricsCollector.instance().set_gauge(
+                    "orders_failed", self.stats["orders_failed"])
                 err = entry.error if entry else "no orders returned"
                 logger.error("ORDER FAILED %s: %s", signal.symbol, err)
                 return
@@ -277,6 +290,8 @@ class SystemRunner:
                     "; ".join(f"{o.order_type}={o.error}" for o in protection),
                 )
             self.stats["orders_placed"] += 1
+            MetricsCollector.instance().set_gauge(
+                "orders_placed", self.stats["orders_placed"])
             self.portfolio.open_position(Position(
                 symbol=signal.symbol, direction=signal.direction,
                 quantity=qty, entry_price=signal.entry_price, leverage=3,
@@ -285,6 +300,8 @@ class SystemRunner:
                         signal.symbol, signal.direction, qty, signal.entry_price)
         except Exception as e:
             self.stats["orders_failed"] += 1
+            MetricsCollector.instance().set_gauge(
+                "orders_failed", self.stats["orders_failed"])
             logger.error("ORDER EXCEPTION %s: %s", signal.symbol, e)
 
     # ─── Kill switch / 熔断 ───
@@ -315,19 +332,55 @@ class SystemRunner:
             active = getattr(self.orders, "active_orders", []) or []
             for order in active:
                 if getattr(order, "state", None) and order.state.value not in ("FILLED", "CANCELED"):
-                    symbol, oid = order.symbol, order.order_id
-                    if order.order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
-                        resp = self.gateway.cancel_algo_order(symbol, oid)
-                        if getattr(resp, "status", "") == "ERROR":
-                            logger.warning("Algo order cancel failed %s algoId=%s: %s",
-                                           symbol, oid, getattr(resp, "error", ""))
-                    else:
-                        resp = self.gateway.cancel_order(symbol, oid)
-                        if getattr(resp, "status", "") == "ERROR":
-                            logger.warning("Order cancel failed %s orderId=%s: %s",
-                                           symbol, oid, getattr(resp, "error", ""))
+                    self._cancel_one_order(order)
         except Exception as e:
             logger.error("Cancel active orders failed: %s", e)
+
+    def _cancel_one_order(self, order):
+        """单个订单撤单，按类型分流 (LIMIT → cancel_order, 条件单 → cancel_algo_order)。
+
+        撤单后标记 CANCELED（含返回 ERROR 的已成交/已触发单: 交易所侧已无此单，
+        标记后不再进入活跃集，避免每轮重复检测/重复告警；对账由 reconciler 兜底）。
+        """
+        symbol, oid = order.symbol, order.order_id
+        if order.order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            resp = self.gateway.cancel_algo_order(symbol, oid)
+            if getattr(resp, "status", "") == "ERROR":
+                logger.warning("Algo order cancel failed %s algoId=%s: %s",
+                               symbol, oid, getattr(resp, "error", ""))
+        else:
+            resp = self.gateway.cancel_order(symbol, oid)
+            if getattr(resp, "status", "") == "ERROR":
+                logger.warning("Order cancel failed %s orderId=%s: %s",
+                               symbol, oid, getattr(resp, "error", ""))
+        order.state = OrderState.CANCELED
+
+    def _check_pending_timeouts(self):
+        """PENDING 订单超时检测: 超时自动撤单，避免僵尸单 (每 60s 轮询)。
+
+        判定: active_orders 中 state == PENDING 且存在时长 > pending_timeout_minutes。
+        例外: 该 symbol 有持仓时跳过——入场单已成交 (本地状态未同步) 或
+        止损/止盈条件单是持仓保护，均不适用"价格没回踩到位"的超时撤单。
+        """
+        if self.pending_timeout_minutes <= 0:
+            return  # 0 = 禁用超时撤单
+        active = getattr(self.orders, "active_orders", None) or []
+        if not active:
+            return
+        positions = getattr(self.portfolio, "positions", None) or {}
+        now = time.time()
+        for order in list(active):
+            if getattr(order, "state", None) != OrderState.PENDING:
+                continue
+            if order.symbol in positions:
+                continue  # 持仓保护单 / 已成交入场单, 不撤
+            age = now - order.created_at
+            if age <= self.pending_timeout_minutes * 60:
+                continue
+            logger.error("PENDING TIMEOUT %s %s orderId=%s age=%.1fm (>%dm) — 自动撤单",
+                         order.symbol, order.order_type, order.order_id,
+                         age / 60, self.pending_timeout_minutes)
+            self._cancel_one_order(order)
 
     # ─── 健康监控 ───
 
@@ -337,11 +390,26 @@ class SystemRunner:
             now = time.time()
             if last is not None:
                 self._last_data_ts[sym] = now
-            elif now - self._last_data_ts[sym] > STALE_THRESHOLD:
+                self._stall_strikes[sym] = 0  # 价格恢复: 连续停滞计数清零
+                continue
+            if now - self._last_data_ts.get(sym, now) > STALE_THRESHOLD:
                 self.stats["stalls"] += 1
                 self._last_data_ts[sym] = now
-                logger.warning("STALL %s: 无数据 %ds", sym, STALE_THRESHOLD)
+                strikes = self._stall_strikes.get(sym, 0) + 1
+                self._stall_strikes[sym] = strikes
+                logger.warning("STALL %s: 无数据 %ds (strike %d/%d)",
+                               sym, STALE_THRESHOLD, strikes, self.stall_strikes)
                 self._network_diag(reason=f"stall_{sym}")
+                # 连续 stall_strikes 次停滞判定 → 熔断停单 (复用 kill switch 语义:
+                # 停新单 + 撤活跃单; 不自动恢复, 需人工 resume)
+                if self.stall_strikes > 0 and strikes >= self.stall_strikes:
+                    self._stall_strikes[sym] = 0  # 防重复触发, 恢复后重新计数
+                    if self._circuit_breaker is None:
+                        logger.error("STALL BREAKER %s: 连续 %d 次停滞判定 "
+                                     "(每次无数据 %ds) — 触发熔断停单",
+                                     sym, self.stall_strikes, STALE_THRESHOLD)
+                        self._handle_command({"command": "emergency_stop"})
+                        logger.error("stall 熔断已触发, 需手动 resume 恢复")
 
     def _check_connections(self):
         if not self.feed or not self.feed._conns:
@@ -487,6 +555,7 @@ class SystemRunner:
         logger.info("System running (PID=%d)", os.getpid())
         end_time = time.time() + self.hours * 3600 if self.hours > 0 else None
         last_snapshot = time.time()
+        last_pending_check = time.time()
         try:
             while True:
                 # 模块心跳: 主循环每轮标记 runner 存活
@@ -497,6 +566,9 @@ class SystemRunner:
                 if time.time() - last_snapshot >= 60:
                     self._snapshot()
                     last_snapshot = time.time()
+                if time.time() - last_pending_check >= 60:
+                    self._check_pending_timeouts()
+                    last_pending_check = time.time()
                 if end_time is not None and time.time() >= end_time:
                     logger.info("运行时长已到 (%dh), 结束", self.hours)
                     self.report()
@@ -534,6 +606,10 @@ def main():
     parser.add_argument("--no-testnet", dest="testnet", action="store_false", help="连接实盘 (慎用)")
     parser.add_argument("--risk-per-trade", type=float, default=0.015, help="单笔风险比例")
     parser.add_argument("--instance", default="live", help="实例标识")
+    parser.add_argument("--stall-strikes", type=int, default=3,
+                        help="连续停滞判定次数达到后熔断停单 (默认 3, 0=只告警不熔断)")
+    parser.add_argument("--pending-timeout-minutes", type=int, default=30,
+                        help="PENDING 订单超时自动撤单阈值 (分钟, 默认 30, 0=禁用)")
     args = parser.parse_args()
     load_env()
     setup_logging()
@@ -548,6 +624,8 @@ def main():
         hours=args.hours,
         instance=args.instance,
         event_bus=event_bus,
+        stall_strikes=args.stall_strikes,
+        pending_timeout_minutes=args.pending_timeout_minutes,
     )
     try:
         runner.initialize()

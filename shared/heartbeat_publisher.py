@@ -32,9 +32,17 @@ class HeartbeatPublisher:
     def _run_once(self):
         if self.event_bus is None:
             return  # 无发布通道 (注入模式), 避免空转
-        modules = MetricsCollector.instance().heartbeat_ages()
+        m = MetricsCollector.instance()
+        modules = m.heartbeat_ages()
+        # Ops T5: 携带 runner 注册的 gauges 快照, 供 heartbeat_watchdog
+        # 检测 K线闭合停滞 / 订单失败率
+        stats = {
+            "kline_closes": m.get_gauge("kline_closes"),
+            "orders_placed": m.get_gauge("orders_placed"),
+            "orders_failed": m.get_gauge("orders_failed"),
+        }
         self.event_bus.publish("heartbeat", {
-            "instance": self.instance, "modules": modules,
+            "instance": self.instance, "modules": modules, "stats": stats,
         })
 
     def start(self):

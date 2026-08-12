@@ -151,3 +151,165 @@ def test_stream_key_defaults_to_systrader_heartbeat():
     watchdog = HeartbeatWatchdog(redis_client=FakeRedis([make_entry(fresh_iso())]))
     watchdog.last_event_age()
     assert watchdog.stream_key == "systrader:heartbeat"
+
+
+# ─── Ops T5: K线闭合停滞 + 订单失败率 (stats 维度) ───
+
+
+def make_stats_entry(timestamp_iso, stats: dict):
+    """带 stats 字段的 heartbeat 消息 (与真实 EventBus envelope 一致: stats 在 data 内)。"""
+    payload = json.dumps({
+        "event_id": "evt-1", "stream": "heartbeat",
+        "timestamp": timestamp_iso,
+        "data": {"instance": "live", "modules": {}, "stats": stats},
+    })
+    return ["1786545281775-0", {"payload": payload}]
+
+
+def _watchdog_with_notifier(fake, **kw):
+    notifier = MagicMock()
+    return HeartbeatWatchdog(redis_client=fake, notifier=notifier, **kw), notifier
+
+
+@pytest.mark.unit
+def test_closes_stall_alerts_once():
+    """kline_closes 超过 closes_stall_minutes 无增长 → 告警一次, 不重复。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(), {"kline_closes": 10})])
+    watchdog, notifier = _watchdog_with_notifier(fake, closes_stall_minutes=15)
+    watchdog.check_once()                                    # 首次观察: 播种基线, 不告警
+    assert notifier.send.call_count == 0
+    watchdog._last_closes_change_ts -= 16 * 60               # 模拟 16 分钟无增长
+    assert watchdog.check_once() == "normal"                 # 主停滞状态不受影响
+    assert notifier.send.call_count == 1
+    assert "K线闭合" in notifier.send.call_args[0][0]
+    assert watchdog.closes_state == "closes_stale"
+    watchdog.check_once()                                    # 持续停滞不重复告警
+    assert notifier.send.call_count == 1
+
+
+@pytest.mark.unit
+def test_closes_stall_recovers_when_closes_grow():
+    """closes 恢复增长 → 恢复通知一次 → normal。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(), {"kline_closes": 10})])
+    watchdog, notifier = _watchdog_with_notifier(fake, closes_stall_minutes=15)
+    watchdog.check_once()
+    watchdog._last_closes_change_ts -= 16 * 60
+    watchdog.check_once()
+    assert watchdog.closes_state == "closes_stale"
+    fake.entries = [make_stats_entry(fresh_iso(), {"kline_closes": 11})]
+    watchdog.check_once()
+    assert watchdog.closes_state == "recovered"
+    assert "恢复" in notifier.send.call_args[0][0]
+    watchdog.check_once()
+    assert watchdog.closes_state == "normal"
+    assert notifier.send.call_count == 2  # 告警 1 + 恢复 1, 无多余
+
+
+@pytest.mark.unit
+def test_fail_rate_alerts_once_until_recovery():
+    """订单失败率超阈值 → 告警一次 (连续超阈值不重复)。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(),
+                                       {"kline_closes": 1, "orders_placed": 8, "orders_failed": 2})])
+    watchdog, notifier = _watchdog_with_notifier(fake, fail_rate_threshold=0.10)
+    watchdog.check_once()
+    assert notifier.send.call_count == 1
+    msg = notifier.send.call_args[0][0]
+    assert "失败率" in msg and "20.0%" in msg
+    watchdog.check_once()
+    watchdog.check_once()
+    assert notifier.send.call_count == 1
+    assert watchdog.fail_state == "fail_alert"
+
+
+@pytest.mark.unit
+def test_fail_rate_recovers_when_rate_drops():
+    """失败率回落到阈值下 → 恢复通知 → normal。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(),
+                                       {"kline_closes": 1, "orders_placed": 8, "orders_failed": 2})])
+    watchdog, notifier = _watchdog_with_notifier(fake, fail_rate_threshold=0.10)
+    watchdog.check_once()
+    assert watchdog.fail_state == "fail_alert"
+    fake.entries = [make_stats_entry(fresh_iso(),
+                                     {"kline_closes": 1, "orders_placed": 100, "orders_failed": 2})]
+    watchdog.check_once()
+    assert watchdog.fail_state == "recovered"
+    assert "恢复" in notifier.send.call_args[0][0]
+    watchdog.check_once()
+    assert watchdog.fail_state == "normal"
+
+
+@pytest.mark.unit
+def test_normal_stats_no_false_alerts():
+    """正常增长 + 低失败率 → 两个新维度均不告警。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(),
+                                       {"kline_closes": 5, "orders_placed": 10, "orders_failed": 0})])
+    watchdog, notifier = _watchdog_with_notifier(fake)
+    for _ in range(5):
+        watchdog.check_once()
+    fake.entries = [make_stats_entry(fresh_iso(),
+                                     {"kline_closes": 6, "orders_placed": 11, "orders_failed": 0})]
+    watchdog.check_once()
+    assert notifier.send.call_count == 0
+    assert watchdog.closes_state == "normal"
+    assert watchdog.fail_state == "normal"
+
+
+@pytest.mark.unit
+def test_missing_stats_field_no_alerts():
+    """payload 无 stats (旧版 runner) → 新维度静默不误报。"""
+    fake = FakeRedis([make_entry(fresh_iso())])
+    watchdog, notifier = _watchdog_with_notifier(fake)
+    watchdog.check_once()
+    watchdog.check_once()
+    assert notifier.send.call_count == 0
+    assert watchdog.closes_state == "normal"
+    assert watchdog.fail_state == "normal"
+
+
+@pytest.mark.unit
+def test_heartbeat_stale_skips_stats_dimensions():
+    """心跳停滞时 stats 维度不重复告警 (同一根因, 主停滞告警已覆盖)。"""
+    fake = FakeRedis([make_stats_entry(iso_hours_ago(1), {"kline_closes": 10})])
+    watchdog, notifier = _watchdog_with_notifier(fake)
+    watchdog.check_once()
+    assert watchdog._state == "stale"
+    assert notifier.send.call_count == 1          # 只有主停滞告警
+    assert watchdog.closes_state == "normal"      # closes 维度未触发
+
+
+@pytest.mark.unit
+def test_closes_stall_minutes_parameterized():
+    """closes_stall_minutes 参数生效。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(), {"kline_closes": 3})])
+    watchdog, notifier = _watchdog_with_notifier(fake, closes_stall_minutes=5)
+    watchdog.check_once()
+    watchdog._last_closes_change_ts -= 6 * 60     # 6 分钟 > 5 分钟阈值
+    watchdog.check_once()
+    assert notifier.send.call_count == 1
+    assert HeartbeatWatchdog(redis_client=fake, closes_stall_minutes=7).closes_stall_minutes == 7
+
+
+# ─── Ops T5 补充: DINGTALK_WEBHOOK 旧名兼容 ───
+
+
+@pytest.mark.unit
+def test_build_notifier_falls_back_to_old_webhook_name(monkeypatch):
+    """旧名 DINGTALK_WEBHOOK (network_monitor 沿用) 在新名前缺失时兜底。"""
+    monkeypatch.delenv("DINGTALK_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=old")
+    monkeypatch.setenv("DINGTALK_SECRET", "SECold")
+    notifier = build_notifier()
+    assert notifier is not None
+    assert notifier.webhook_url.startswith("https://oapi.dingtalk.com")
+    assert "access_token=old" in notifier.webhook_url
+    assert notifier.secret == "SECold"
+
+
+@pytest.mark.unit
+def test_build_notifier_new_name_takes_priority(monkeypatch):
+    """两个名字都存在时新名 DINGTALK_WEBHOOK_URL 优先。"""
+    monkeypatch.setenv("DINGTALK_WEBHOOK_URL", "https://oapi.dingtalk.com/robot/send?access_token=new")
+    monkeypatch.setenv("DINGTALK_WEBHOOK", "https://oapi.dingtalk.com/robot/send?access_token=old")
+    notifier = build_notifier()
+    assert notifier is not None
+    assert "access_token=new" in notifier.webhook_url

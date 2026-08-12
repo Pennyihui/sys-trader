@@ -31,6 +31,21 @@ def test_publishes_heartbeat_with_module_times():
 
 
 @pytest.mark.unit
+def test_payload_includes_stats_gauges():
+    """payload 携带 stats: kline_closes / orders_placed / orders_failed gauges。"""
+    bus = MagicMock()
+    collector = MetricsCollector.instance()
+    collector.set_gauge("kline_closes", 42)
+    collector.set_gauge("orders_placed", 7)
+    collector.set_gauge("orders_failed", 1)
+    publisher = HeartbeatPublisher(bus, interval=0.05)
+    publisher._run_once()
+    stream, payload = bus.publish.call_args[0]
+    assert stream == "heartbeat"
+    assert payload["stats"] == {"kline_closes": 42, "orders_placed": 7, "orders_failed": 1}
+
+
+@pytest.mark.unit
 def test_stop_clears_flag():
     bus = MagicMock()
     publisher = HeartbeatPublisher(bus, interval=0.05)

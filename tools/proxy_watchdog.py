@@ -176,8 +176,14 @@ class ProxyWatchdog:
 
 
 def make_notifier():
-    """按环境变量构建钉钉通知器；DINGTALK_WEBHOOK_URL 缺失返回 None。"""
-    url = os.environ.get("DINGTALK_WEBHOOK_URL", "").strip()
+    """按环境变量构建钉钉通知器；两个 webhook 变量名均未配置时返回 None。
+
+    webhook 兼容两个环境变量名:
+      - DINGTALK_WEBHOOK_URL  (watchdog 现行命名, 优先)
+      - DINGTALK_WEBHOOK      (tools/network_monitor/notifier.py 沿用旧名, 兜底)
+    secret 统一用 DINGTALK_SECRET。
+    """
+    url = (os.environ.get("DINGTALK_WEBHOOK_URL") or os.environ.get("DINGTALK_WEBHOOK") or "").strip()
     if not url:
         return None
     try:

@@ -1,10 +1,21 @@
 """SystemRunner 统一装配测试 — mock gateway，验证完整信号链接线。"""
 
+import time
+
 import pytest
 from unittest.mock import MagicMock, patch
 
 from execution.order_manager import ManagedOrder, OrderState
-from shared.runner import SystemRunner
+from monitor.collector import MetricsCollector
+from shared.runner import STALE_THRESHOLD, SystemRunner
+
+
+@pytest.fixture(autouse=True)
+def _isolate_metrics():
+    """MetricsCollector 是跨测试文件共享的单例 — runner gauge 断言前重置隔离。"""
+    MetricsCollector.reset()
+    yield
+    MetricsCollector.reset()
 
 
 @pytest.fixture
@@ -197,3 +208,206 @@ def test_hours_zero_runs_forever():
 def test_hours_positive_bounds_run():
     r = SystemRunner(hours=168)
     assert r.hours == 168  # soak 模式 7 天
+
+
+# ─── Ops T5: 数据停滞熔断 / PENDING 超时撤单 / stats gauges ───
+
+
+def _simulate_no_price(runner):
+    """全部 symbol 无价格且进入停滞判定窗口 (每次判定后需重置窗口模拟下一个 120s)。
+
+    注: 每次停滞判定后 _last_data_ts 被重置, 下一次判定需再等一个 STALE_THRESHOLD
+    窗口 — 与生产语义一致 (连续 strike = 连续多个无数据窗口, 3 次 ≈ 6 分钟)。
+    """
+    runner.feed.get_last_price.return_value = None
+    now = time.time()
+    runner._last_data_ts = {s: now - STALE_THRESHOLD - 1 for s in runner.symbols}
+
+
+@pytest.mark.unit
+def test_stall_three_strikes_trigger_circuit_breaker(runner):
+    """连续 3 次停滞判定 → 熔断停单 (circuit breaker 置位)。"""
+    with patch.object(runner, "_network_diag"):
+        for _ in range(3):
+            _simulate_no_price(runner)
+            runner._check_stall()
+    assert runner._circuit_breaker == "emergency_stop"
+    # stalls 按 symbol 计数: 3 symbols × 3 次判定
+    assert runner.stats["stalls"] == 3 * len(runner.symbols)
+
+
+@pytest.mark.unit
+def test_stall_less_than_strikes_no_breaker(runner):
+    """连续 2 次停滞判定 (默认 3) 不触发熔断。"""
+    with patch.object(runner, "_network_diag"):
+        for _ in range(2):
+            _simulate_no_price(runner)
+            runner._check_stall()
+    assert runner._circuit_breaker is None
+
+
+@pytest.mark.unit
+def test_stall_strikes_parameterized():
+    """--stall-strikes 参数生效 (stall_strikes=2 时 2 次即熔断)。"""
+    r = SystemRunner(stall_strikes=2)
+    assert r.stall_strikes == 2
+    r.feed = MagicMock()
+    with patch.object(r, "_network_diag"):
+        for _ in range(2):
+            _simulate_no_price(r)
+            r._check_stall()
+    assert r._circuit_breaker == "emergency_stop"
+
+
+@pytest.mark.unit
+def test_stall_breaker_no_auto_resume_on_recovery(runner):
+    """价格恢复后熔断不自动解除 (需手动 resume, 与 kill switch 语义一致)。"""
+    with patch.object(runner, "_network_diag"):
+        for _ in range(3):
+            _simulate_no_price(runner)
+            runner._check_stall()
+    assert runner._circuit_breaker == "emergency_stop"
+    runner.feed.get_last_price.return_value = 64000.0
+    runner._check_stall()
+    assert runner._circuit_breaker == "emergency_stop"
+
+
+@pytest.mark.unit
+def test_stall_strikes_reset_on_price_recovery(runner):
+    """价格恢复清零连续停滞计数, 之后重新计数。"""
+    with patch.object(runner, "_network_diag"):
+        for _ in range(2):
+            _simulate_no_price(runner)
+            runner._check_stall()
+    assert runner._circuit_breaker is None
+    runner.feed.get_last_price.return_value = 64000.0
+    runner._check_stall()                          # 恢复 → 计数清零
+    with patch.object(runner, "_network_diag"):
+        _simulate_no_price(runner)
+        runner._check_stall()
+    assert runner._circuit_breaker is None         # 重新计数, 1 次不足 3
+
+
+@pytest.mark.unit
+def test_pending_timeout_cancels_stale_entry(runner):
+    """PENDING 入场单超时 → 自动撤单 (cancel_order)。"""
+    runner.orders = MagicMock()
+    runner.portfolio.positions = {}
+    runner.gateway = MagicMock()
+    stale = ManagedOrder(
+        order_id=55, symbol="BTCUSDT", side="BUY", order_type="LIMIT",
+        quantity=0.001, price=64000.0, state=OrderState.PENDING,
+        created_at=time.time() - 31 * 60,
+    )
+    runner.orders.active_orders = [stale]
+    runner._check_pending_timeouts()
+    runner.gateway.cancel_order.assert_called_once_with("BTCUSDT", 55)
+    assert stale.state == OrderState.CANCELED  # 撤单后移出活跃集, 不再重复检测
+
+
+@pytest.mark.unit
+def test_pending_timeout_skips_fresh_order(runner):
+    """未超时的 PENDING 订单不撤。"""
+    runner.orders = MagicMock()
+    runner.portfolio.positions = {}
+    runner.gateway = MagicMock()
+    fresh = ManagedOrder(
+        order_id=56, symbol="BTCUSDT", side="BUY", order_type="LIMIT",
+        quantity=0.001, price=64000.0, state=OrderState.PENDING,
+        created_at=time.time() - 10 * 60,
+    )
+    runner.orders.active_orders = [fresh]
+    runner._check_pending_timeouts()
+    runner.gateway.cancel_order.assert_not_called()
+    assert fresh.state == OrderState.PENDING
+
+
+@pytest.mark.unit
+def test_pending_timeout_cancels_zombie_algo_order(runner):
+    """无持仓时超时条件单 (TAKE_PROFIT_MARKET) 按类型走 cancel_algo_order。"""
+    runner.orders = MagicMock()
+    runner.portfolio.positions = {}
+    runner.gateway = MagicMock()
+    zombie = ManagedOrder(
+        order_id=303, symbol="ETHUSDT", side="SELL", order_type="TAKE_PROFIT_MARKET",
+        quantity=0.01, price=66000.0, state=OrderState.PENDING,
+        created_at=time.time() - 45 * 60,
+    )
+    runner.orders.active_orders = [zombie]
+    runner._check_pending_timeouts()
+    runner.gateway.cancel_algo_order.assert_called_once_with("ETHUSDT", 303)
+
+
+@pytest.mark.unit
+def test_pending_timeout_keeps_protection_for_open_position(runner):
+    """有持仓的 symbol: 止损条件单是持仓保护, 超时不撤。"""
+    runner.orders = MagicMock()
+    runner.portfolio.positions = {"BTCUSDT": MagicMock()}
+    runner.gateway = MagicMock()
+    sl = ManagedOrder(
+        order_id=202, symbol="BTCUSDT", side="SELL", order_type="STOP_MARKET",
+        quantity=0.001, price=62000.0, state=OrderState.PENDING,
+        created_at=time.time() - 60 * 60,
+    )
+    runner.orders.active_orders = [sl]
+    runner._check_pending_timeouts()
+    runner.gateway.cancel_algo_order.assert_not_called()
+    runner.gateway.cancel_order.assert_not_called()
+    assert sl.state == OrderState.PENDING
+
+
+@pytest.mark.unit
+def test_pending_timeout_minutes_parameterized(runner):
+    """--pending-timeout-minutes 参数生效。"""
+    assert SystemRunner().pending_timeout_minutes == 30
+    r = SystemRunner(pending_timeout_minutes=10)
+    r.orders = MagicMock()
+    r.portfolio = MagicMock()
+    r.portfolio.positions = {}
+    r.gateway = MagicMock()
+    stale = ManagedOrder(
+        order_id=77, symbol="BTCUSDT", side="BUY", order_type="LIMIT",
+        quantity=0.001, price=64000.0, state=OrderState.PENDING,
+        created_at=time.time() - 11 * 60,
+    )
+    r.orders.active_orders = [stale]
+    r._check_pending_timeouts()
+    r.gateway.cancel_order.assert_called_once_with("BTCUSDT", 77)
+
+
+@pytest.mark.unit
+def test_kline_close_sets_metrics_gauge(runner):
+    """_on_kline_closed 注册 kline_closes gauge。"""
+    runner.engine = MagicMock()
+    runner.engine.strategy.timeframe = "15m"
+    runner.engine.run.return_value = None  # 无信号
+    runner._on_kline_closed("BTCUSDT", "15m", [MagicMock()])
+    assert MetricsCollector.instance().get_gauge("kline_closes") == 1
+
+
+@pytest.mark.unit
+def test_order_outcome_sets_metrics_gauges(runner):
+    """下单成功注册 orders_placed gauge (与 kline_closes)。"""
+    _wire_signal_chain(runner)
+    runner.orders.execute_signal.return_value = [_entry_order()]
+    runner._on_kline_closed("BTCUSDT", "15m", [MagicMock()])
+    m = MetricsCollector.instance()
+    assert m.get_gauge("kline_closes") == 1
+    assert m.get_gauge("orders_placed") == 1
+    assert m.get_gauge("orders_failed") == 0
+
+
+@pytest.mark.unit
+def test_order_failure_sets_metrics_gauge(runner):
+    """下单失败注册 orders_failed gauge。"""
+    _wire_signal_chain(runner)
+    runner.orders.execute_signal.return_value = [
+        ManagedOrder(
+            order_id=1, symbol="BTCUSDT", side="BUY", order_type="LIMIT",
+            quantity=0.001, price=64000.0, state=OrderState.REJECTED, error="insufficient margin",
+        ),
+    ]
+    runner._on_kline_closed("BTCUSDT", "15m", [MagicMock()])
+    m = MetricsCollector.instance()
+    assert m.get_gauge("orders_failed") == 1
+    assert m.get_gauge("orders_placed") == 0
