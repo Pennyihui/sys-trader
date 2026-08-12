@@ -177,6 +177,16 @@ class TestServerTimeSync:
         # 偏移 ≈ +5s（毫秒级时序差允许 ±100ms：sync 内部重新取时）
         assert 4900 <= self.gw._time_offset <= 5100
 
+    def test_recv_window_included_in_signed_params(self):
+        """签名请求携带 recvWindow=15000（容忍代理延迟波动）。"""
+        with patch("execution.order_gateway.requests.get",
+                   side_effect=lambda url, **kw: self._resp(200, {"orderId": 9, "status": "NEW"})) as mock_get:
+            result = self.gw._request("GET", "/fapi/v2/account", {})
+        assert result["orderId"] == 9
+        _, kwargs = mock_get.call_args_list[-1]
+        params = kwargs.get("params", {})
+        assert params.get("recvWindow") == 15000
+
     def test_sync_failure_degrades_to_zero(self):
         """sync 网络失败 → 偏移退化为 0，业务请求仍正常（本机时间）。"""
         import time as _time

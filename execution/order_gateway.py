@@ -139,6 +139,9 @@ class OrderGateway:
         for attempt in range(self.retry_business_errors):
             # 每次重试都重新签名：时间戳必须刷新，否则 -1021 不会自愈
             params["timestamp"] = int(time.time() * 1000) + self._time_offset
+            # 放宽签名窗口：国内代理延迟波动可达 6-10s（默认 5s 窗口会被
+            # 拖出窗）。15s 容忍度高且对低频策略安全（可配置覆盖）。
+            params["recvWindow"] = int(os.environ.get("RECV_WINDOW", "15000"))
             params["signature"] = self._sign(params)
             if method == "POST":
                 resp = requests.post(url, headers=headers, data=params, timeout=10, proxies=self.proxies)
