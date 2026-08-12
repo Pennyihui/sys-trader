@@ -24,9 +24,12 @@ def main():
     parser.add_argument("--strategy", default="scalping_15m")
     args = parser.parse_args()
     setup_logging(log_dir="logs", json_console=False)
+    from shared.event_bus import EventBus
+    event_bus = EventBus(redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379"))
     runner = SystemRunner(
         testnet=True, symbols=args.symbols.split(","),
         strategy_name=args.strategy, hours=args.hours,
+        event_bus=event_bus,
     )
     try:
         runner.initialize()
