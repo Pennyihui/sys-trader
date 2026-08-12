@@ -160,3 +160,55 @@ data/trades.db       # 交易记录 SQLite
 logs/                # 日志文件
 models/              # 训练好的模型
 ```
+
+## 进程守护与代理看门狗（Ops T4）
+
+### nssm 服务化（SystraderService）
+
+`tools/install_systrader_service.bat`（右键"以管理员身份运行"）:
+- 服务名 `SystraderService`，命令 `python -m shared.runner --execution-mode live --instance live`
+- 工作目录 = 项目根；崩溃自动重启（AppExit Default Restart，5 秒延迟）
+- 日志: `logs/systrader-service.log` / `logs/systrader-service.err`（每日轮转）
+- 脚本含管理员检查（net session）与安装前二次确认，不会误装
+
+手动命令（nssm 位于 `tools/proxy_pool/nssm.exe`）:
+
+```bat
+:: 安装
+tools\proxy_pool\nssm.exe install SystraderService python "-m shared.runner --execution-mode live --instance live"
+tools\proxy_pool\nssm.exe set SystraderService AppDirectory "D:\Documents\z_python_data_analy\Quent\Sys_trader"
+tools\proxy_pool\nssm.exe set SystraderService Start SERVICE_AUTO_START
+tools\proxy_pool\nssm.exe set SystraderService AppExit Default Restart
+tools\proxy_pool\nssm.exe start SystraderService
+
+:: 停止 / 重启 / 卸载
+tools\proxy_pool\nssm.exe stop SystraderService
+tools\proxy_pool\nssm.exe restart SystraderService
+tools\proxy_pool\nssm.exe remove SystraderService confirm
+```
+
+查看日志: `tail -f logs/systrader-service.log`（PowerShell: `Get-Content logs\systrader-service.log -Wait`）。
+注意: 服务账户的 PATH 可能不含 python，若 `python` 找不到请用绝对路径重装（如 `C:\Users\Evan\anaconda3\python.exe`）。
+
+### 代理故障切换（tools/proxy_watchdog.py）
+
+Clash 代理（127.0.0.1:7897）延迟波动 6-10s 会拖垮 Binance 签名窗口。
+看门狗周期探测 testnet 时间接口，连续超标时调用 proxy_pool 切换节点 + 钉钉告警:
+
+```bash
+python tools/proxy_watchdog.py --threshold-ms 5000 --consecutive 3 --interval 30
+```
+
+- 探测: GET https://testnet.binancefuture.com/fapi/v1/time 走 7897（12s 超时）
+- 判定: 连续 3 次延迟 > 5000ms（或探测失败）→ 切换 + 告警
+- 切换: 读 `tools/proxy_pool/proxy_pool.json` → `apply_config(force_reload=True)`
+  （全量重写 mihomo.yaml + 热重载，与 proxy_pool 服务健康检查同路径）
+- 告警: `DINGTALK_WEBHOOK_URL` 环境变量；缺失时降级为日志
+- 去抖: 切换后 300s 冷却（`--cooldown` 可调）
+
+### 常见问题补充
+
+| 问题 | 检查 | 解决 |
+|------|------|------|
+| 代理延迟持续超标 | `python tools/proxy_watchdog.py` 日志 | 自动切节点；失败则手动 `python tools/proxy_pool/proxy_pool.py --generate` |
+| 服务崩溃未重启 | `nssm status SystraderService` | 确认 AppExit Default Restart 已设置；查 logs/systrader-service.err |
