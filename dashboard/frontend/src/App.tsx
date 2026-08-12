@@ -3,6 +3,7 @@ import { StatusBar } from './components/StatusBar';
 import { MetricCards } from './components/MetricCards';
 import { PositionsTable } from './components/PositionsTable';
 import { SignalsList } from './components/SignalsList';
+import { OrdersList } from './components/OrdersList';
 import { ModuleStatus } from './components/ModuleStatus';
 import { Controls } from './components/Controls';
 
@@ -22,10 +23,13 @@ export default function App() {
           />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
             <PositionsTable positions={data.positions} />
-            <SignalsList />
+            <div className="flex flex-col gap-4">
+              <SignalsList signals={data.signals} />
+              <OrdersList orders={data.orders} />
+            </div>
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
-            <ModuleStatus />
+            <ModuleStatus heartbeats={data.heartbeats} />
             <Controls onCommand={send} lastAck={lastAck} />
           </div>
         </>

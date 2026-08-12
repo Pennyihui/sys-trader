@@ -9,6 +9,37 @@ export interface PositionData {
   unrealized_pnl: number;
 }
 
+// signal.generated / signal.approved / signal.rejected 事件的统一形态
+export interface SignalItem {
+  instance?: string;
+  symbol: string;
+  direction?: string;
+  conviction?: number;
+  entry_price?: number;
+  stop_loss?: number;
+  take_profit?: number;
+  signal_id?: string;
+  strategy?: string;
+  timestamp?: number;
+  // 风控链决策帧: 'signal.approved' | 'signal.rejected'
+  decision?: string;
+  reason?: string;
+  modifications?: Record<string, unknown>;
+}
+
+// order.filled 事件
+export interface OrderItem {
+  instance?: string;
+  symbol: string;
+  side?: string;
+  order_type?: string;
+  status?: string;
+  quantity?: number;
+  price?: number;
+  order_id?: string | number;
+  error?: string | null;
+}
+
 export interface DashboardData {
   equity: number;
   margin_ratio: number;
@@ -17,6 +48,9 @@ export interface DashboardData {
   position_count: number;
   positions: PositionData[];
   prices: Record<string, { last: number | null; mark: number | null }>;
+  signals: SignalItem[];
+  orders: OrderItem[];
+  heartbeats: Record<string, number>;
 }
 
 export interface CommandAck {
