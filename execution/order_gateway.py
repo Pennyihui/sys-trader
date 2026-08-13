@@ -130,6 +130,7 @@ class OrderGateway:
             server = resp.json().get("serverTime")
             if server:
                 self._time_offset = int(server) - now
+                self._record_offset(self._time_offset)
                 logger.info("Server time synced (offset=%dms)", self._time_offset)
                 return
             logger.warning("Server time sync: empty serverTime in response")
@@ -138,6 +139,28 @@ class OrderGateway:
                 "Server time sync failed (keep last offset=%dms): %s",
                 self._time_offset, e,
             )
+
+    @staticmethod
+    def _record_offset(offset_ms: int):
+        """把时间偏移追加到 JSONL 时序文件 + 注册 MetricsCollector gauge。
+
+        用于离线画"时间偏移曲线"，分析时钟漂移/代理延迟趋势。
+        文件每行一条 {"ts": <epoch_ms>, "offset_ms": <int>}，与交易系统
+        真正用于签名的偏移量一一对应。失败静默（记录是观测增强，不阻塞交易）。
+        """
+        import json as _json
+        path = os.environ.get("TIME_OFFSET_LOG", "logs/time_offset.jsonl")
+        try:
+            rec = _json.dumps({"ts": int(time.time() * 1000), "offset_ms": int(offset_ms)})
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(rec + "\n")
+        except Exception as e:
+            logger.debug("记录时间偏移失败: %s", e)
+        try:
+            from monitor.collector import MetricsCollector
+            MetricsCollector.instance().set_gauge("server_time_offset", float(offset_ms))
+        except Exception:
+            pass
 
     @staticmethod
     def _is_business_retryable(resp, body: dict) -> bool:

@@ -42,7 +42,10 @@ def test_payload_includes_stats_gauges():
     publisher._run_once()
     stream, payload = bus.publish.call_args[0]
     assert stream == "heartbeat"
-    assert payload["stats"] == {"kline_closes": 42, "orders_placed": 7, "orders_failed": 1}
+    assert payload["stats"] == {
+        "kline_closes": 42, "orders_placed": 7, "orders_failed": 1,
+        "server_time_offset": 0.0,
+    }
 
 
 @pytest.mark.unit

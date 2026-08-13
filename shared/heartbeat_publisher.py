@@ -40,6 +40,7 @@ class HeartbeatPublisher:
             "kline_closes": m.get_gauge("kline_closes"),
             "orders_placed": m.get_gauge("orders_placed"),
             "orders_failed": m.get_gauge("orders_failed"),
+            "server_time_offset": m.get_gauge("server_time_offset"),
         }
         self.event_bus.publish("heartbeat", {
             "instance": self.instance, "modules": modules, "stats": stats,
