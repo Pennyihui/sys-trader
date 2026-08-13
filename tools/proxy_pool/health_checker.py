@@ -1,7 +1,7 @@
 """健康检查器 - 并发测速所有节点，标记可用/不可用。
 
 两阶段:
-  阶段1: TCP 连接测速（快，全量节点）→ healthy / latency_ms
+  阶段1: 经 mihomo 测通用连通性（gstatic 204 粗筛，全量节点）→ healthy / latency_ms
   阶段2: 传输探测（通过 mihomo 按节点测速，两类分开）:
          - binance_ok（交易关键）每轮全量探测，不受 CAP 限制 → 能到 fapi.binance.com
          - transfer_ok（YouTube，浏览器需求）环形窗口轮换 → 真能传数据的节点
@@ -16,7 +16,6 @@
 import logging
 import json
 import os
-import socket
 import time
 import urllib.request
 import urllib.error
@@ -41,11 +40,52 @@ TRANSFER_TIMEOUT_MS = 8000     # 8s 内完成才算真健康
 # 调大到 ≥ 健康节点总数后实际每轮全覆盖；binance 探测不受此上限约束（见 health_check）。
 TRANSFER_PROBE_CAP = 3000
 
+# 阶段1 连通性测速参数——经 mihomo 的 /proxies/{name}/delay API 测真实路径:
+#   目标选 gstatic 204 探针（轻量、稳定，config 之前用的就是这个）做粗筛：
+#   阶段1 只回答"节点通不通"，阶段2 才精筛"能否到币安/YouTube"，两阶段目标不冲突。
+#   绝不能用直连 socket：免费机场节点在境外，国内网络直连必超时（实测前 500 节点
+#   并发仅 164 个能直连），会把全量节点误杀成 unhealthy、healthy=0、配置退化。
+STAGE1_URL = "https://www.gstatic.com/generate_204"
+STAGE1_TIMEOUT_MS = 5000       # 5s 内完成才算通
+
 _probe_round = 0
 
 
+def _mihomo_delay(prefixed_name: str, target: str, timeout_ms: int) -> tuple:
+    """经 mihomo 按节点测速（GET /proxies/{name}/delay?url=target）。
+
+    返回 (ok, latency_ms)：delay 为限时内完成的整数/浮点毫秒数才算健康。
+    import 放 try 内：跑在线程池里，核心未启动或 import 失败不能抛到健康循环外，
+    一律按 (False, None) 处理。
+    """
+    q_name = urllib.parse.quote(prefixed_name, safe="")
+    q_url = urllib.parse.quote(target, safe="")
+    try:
+        # import 放 try 内：探测跑在线程池里，import 失败不能抛到健康循环外中断探测
+        from core_manager import CONTROLLER
+        from config_generator import CONTROLLER_SECRET
+        api = f"{CONTROLLER}/proxies/{q_name}/delay?url={q_url}&timeout={timeout_ms}"
+        req = urllib.request.Request(
+            api, headers={"Authorization": f"Bearer {CONTROLLER_SECRET}"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout_ms / 1000 + 2) as resp:
+            delay = json.loads(resp.read()).get("delay")
+            if isinstance(delay, (int, float)) and 0 < delay < timeout_ms:
+                return True, delay
+    except Exception:
+        pass
+    return False, None
+
+
 def _check_one(entry: dict, timeout: float) -> tuple:
-    """阶段1: TCP 连接测速，返回 (name, is_healthy, latency_ms)。"""
+    """阶段1: 经 mihomo 测通用连通性，返回 (name, is_healthy, latency_ms)。
+
+    必须走 mihomo delay API 而非直连 socket——vless/trojan/hysteria2 不讲 HTTP，
+    只有 mihomo 会翻译，直连境外节点在国内网络必超时。节点名用 _prefixed_name(entry)
+    （带 source 前缀，与 mihomo 配置里的名字一致）；不在配置里的节点 mihomo 回 404，
+    delay 为 null，按不健康处理。
+    timeout 参数保留以维持签名不变，实际超时由 STAGE1_TIMEOUT_MS 控制。
+    """
     server = entry.get("server", "")
     port = entry.get("port", 0)
     name = entry.get("name", "?")
@@ -53,16 +93,10 @@ def _check_one(entry: dict, timeout: float) -> tuple:
     if not server or not port:
         return name, False, None
 
-    start = time.time()
-    try:
-        sock = socket.create_connection((server, port), timeout=timeout)
-        latency_ms = (time.time() - start) * 1000
-        sock.close()
+    ok, latency_ms = _mihomo_delay(_prefixed_name(entry), STAGE1_URL, STAGE1_TIMEOUT_MS)
+    if ok:
         return name, True, latency_ms
-    except (socket.timeout, ConnectionRefusedError, OSError):
-        return name, False, None
-    except Exception:
-        return name, False, None
+    return name, False, None
 
 
 def _prefixed_name(entry: dict) -> str:
@@ -87,21 +121,8 @@ def _probe_url(prefixed_name: str, target: str) -> bool:
     mihomo 负责协议翻译（直接发 CONNECT 是错的——vless/trojan 不讲 HTTP）；
     delay 为限时内完成请求才算真健康。
     """
-    q_name = urllib.parse.quote(prefixed_name, safe="")
-    q_url = urllib.parse.quote(target, safe="")
-    try:
-        # import 放 try 内：探测跑在线程池里，import 失败不能抛到健康循环外中断探测
-        from core_manager import CONTROLLER
-        from config_generator import CONTROLLER_SECRET
-        api = f"{CONTROLLER}/proxies/{q_name}/delay?url={q_url}&timeout={TRANSFER_TIMEOUT_MS}"
-        req = urllib.request.Request(
-            api, headers={"Authorization": f"Bearer {CONTROLLER_SECRET}"}
-        )
-        with urllib.request.urlopen(req, timeout=TRANSFER_TIMEOUT_MS / 1000 + 2) as resp:
-            delay = json.loads(resp.read()).get("delay")
-            return isinstance(delay, (int, float)) and 0 < delay < TRANSFER_TIMEOUT_MS
-    except Exception:
-        return False
+    ok, _ = _mihomo_delay(prefixed_name, target, TRANSFER_TIMEOUT_MS)
+    return ok
 
 
 def health_check(pool: Dict, timeout: float = 3.0) -> Dict:
