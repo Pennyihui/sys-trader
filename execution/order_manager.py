@@ -218,11 +218,16 @@ class OrderManager:
         )
         db_order_id = self._persist_submit(req)
         resp = self._place_with_retry(req)
-        state = (
-            OrderState.REJECTED
-            if resp.status in ("REJECTED", "ERROR")
-            else OrderState.PENDING
-        )
+        # 状态映射: 已成交 (FILLED/PARTIALLY_FILLED) 与待成交 (NEW) 区分,
+        # 仅 REJECTED/ERROR 记为失败; NEW → PENDING 保留在活跃集等待成交
+        if resp.status in ("REJECTED", "ERROR"):
+            state = OrderState.REJECTED
+        elif resp.status == "FILLED":
+            state = OrderState.FILLED
+        elif resp.status == "PARTIALLY_FILLED":
+            state = OrderState.PARTIALLY_FILLED
+        else:
+            state = OrderState.PENDING
         order = ManagedOrder(
             order_id=resp.order_id,
             symbol=symbol,
@@ -231,6 +236,8 @@ class OrderManager:
             quantity=quantity,
             price=entry_price,
             state=state,
+            filled_qty=resp.executed_qty or 0.0,
+            avg_price=resp.avg_price or 0.0,
             error=resp.error or "",
             db_order_id=db_order_id,
         )
@@ -322,10 +329,11 @@ class OrderManager:
         stop_loss: float,
         take_profit: float,
     ) -> List[ManagedOrder]:
-        orders = []
-        orders.append(
-            self.submit_entry(symbol, direction, quantity, entry_price, stop_loss, take_profit)
-        )
+        # 先下入场单, 若被拒/出错则跳过止损/止盈, 避免对未成交仓位挂保护单
+        entry = self.submit_entry(symbol, direction, quantity, entry_price, stop_loss, take_profit)
+        if entry.state in (OrderState.REJECTED, OrderState.ERROR):
+            return [entry]
+        orders = [entry]
         orders.append(self.submit_stop_loss(symbol, direction, quantity, stop_loss))
         orders.append(self.submit_take_profit(symbol, direction, quantity, take_profit))
         return orders

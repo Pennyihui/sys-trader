@@ -33,6 +33,25 @@ def count_errors(log_path: str) -> int:
         return sum(1 for line in f if "ERROR" in line or "WARNING" in line)
 
 
+def _baseline_path(out: str) -> str:
+    """错误累计值 sidecar 文件路径（重启后用于恢复基线）。"""
+    return out + ".last"
+
+
+def _load_baseline(out: str) -> Optional[int]:
+    """读取上次错误累计值; sidecar 不存在或损坏返回 None (首轮播种基线)。"""
+    try:
+        with open(_baseline_path(out), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _save_baseline(out: str, value: int):
+    with open(_baseline_path(out), "w", encoding="utf-8") as f:
+        f.write(str(value))
+
+
 def collect_metrics(log_path: str = None, pid: int = None) -> dict:
     return {"ts": time.time(), "rss_mb": round(rss_mb(pid), 1),
             "errors_last_hour": count_errors(log_path)}
@@ -62,9 +81,17 @@ def main():
     if not os.path.exists(args.out):
         with open(args.out, "w") as f:
             f.write(header)
-    last_errors = 0
+    last_errors = _load_baseline(args.out)
     while True:
+        if last_errors is None:
+            # 首次运行或 sidecar 缺失: 首轮播种基线, 不计增量,
+            # 避免重启后 last_errors=0 把全量错误当增量误报
+            last_errors = count_errors(args.log)
+            _save_baseline(args.out, last_errors)
+            time.sleep(args.interval)
+            continue
         last_errors = sample_and_append(args.out, args.log, last_errors, args.pid)
+        _save_baseline(args.out, last_errors)
         time.sleep(args.interval)
 
 

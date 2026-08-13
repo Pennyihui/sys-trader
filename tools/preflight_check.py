@@ -149,6 +149,9 @@ def check_heartbeat(redis_url: str = DEFAULT_REDIS_URL, stream: str = HEARTBEAT_
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age < 0:
+            # 时钟漂移导致心跳时间在未来: 判 FAIL, 避免负 age 直接通过
+            return False, f"心跳时间在未来 (age={age:.0f}s), 请检查系统时钟漂移"
         if age > max_age_s:
             return False, f"最后心跳 {age:.0f}s 前 (>{max_age_s}s, 主系统疑似停滞)"
         return True, f"最后心跳 {age:.0f}s 前"

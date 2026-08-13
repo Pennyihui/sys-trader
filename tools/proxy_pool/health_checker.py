@@ -1,0 +1,198 @@
+"""健康检查器 - 并发测速所有节点，标记可用/不可用。
+
+两阶段:
+  阶段1: TCP 连接测速（快，全量节点）→ healthy / latency_ms
+  阶段2: 传输探测（通过 mihomo 按节点测速 YouTube，环形窗口轮换）
+         → transfer_ok=True 的才是"真能传数据"的节点。
+
+实测教训（2026-08-07）:
+  - 直接对节点发 HTTP CONNECT 是错的——vless/trojan/hysteria2 不讲 HTTP 协议，
+    只有 mihomo 会翻译。所以探测必须通过 mihomo 的
+    GET /proxies/{name}/delay?url=... API（测的是真实路径）。
+  - 目标用 YouTube：用户真实需求是能看 YouTube。
+"""
+
+import logging
+import json
+import os
+import socket
+import time
+import urllib.request
+import urllib.error
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from typing import Dict
+
+logger = logging.getLogger(__name__)
+
+MAX_WORKERS = 50
+
+# 阶段2 传输探测参数——通过 mihomo 按节点测速两个目标:
+#   1. YouTube favicon（浏览器需求，transfer_ok）
+#   2. fapi.binance.com（交易需求，binance_ok——能到实盘接口的节点必能到模拟盘）
+# 用 favicon/轻接口而不是大文件：免费节点对新建连接限速严重，大文件会误杀
+# "能到但慢"的节点。带宽由 mihomo 的 LB 健康检查（AUTO_URL）持续管理。
+TRANSFER_URL = "https://www.youtube.com/favicon.ico"
+BINANCE_URL = "https://fapi.binance.com/fapi/v1/time"
+TRANSFER_TIMEOUT_MS = 8000     # 8s 内完成才算真健康
+TRANSFER_PROBE_CAP = 800       # 每轮最多探测数（环形轮换，多轮覆盖全部）
+
+_probe_round = 0
+
+
+def _check_one(entry: dict, timeout: float) -> tuple:
+    """阶段1: TCP 连接测速，返回 (name, is_healthy, latency_ms)。"""
+    server = entry.get("server", "")
+    port = entry.get("port", 0)
+    name = entry.get("name", "?")
+
+    if not server or not port:
+        return name, False, None
+
+    start = time.time()
+    try:
+        sock = socket.create_connection((server, port), timeout=timeout)
+        latency_ms = (time.time() - start) * 1000
+        sock.close()
+        return name, True, latency_ms
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return name, False, None
+    except Exception:
+        return name, False, None
+
+
+def _prefixed_name(entry: dict) -> str:
+    """节点在 mihomo 配置里的名字（与 config_generator.build_clash_proxies 一致）。"""
+    return f"{entry.get('source', 'other')}-{entry['name']}"
+
+
+def _load_config_proxy_names() -> set:
+    """当前 mihomo.yaml 里存在的节点名集合（探测只测这些，避免 404 误标）。"""
+    import yaml
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "mihomo.yaml"), encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return {p["name"] for p in cfg.get("proxies", [])}
+    except Exception:
+        return set()
+
+
+def _probe_url(prefixed_name: str, target: str) -> bool:
+    """阶段2: 通过 mihomo 按节点测速（GET /proxies/{name}/delay?url=target）。
+
+    mihomo 负责协议翻译（直接发 CONNECT 是错的——vless/trojan 不讲 HTTP）；
+    delay 为限时内完成请求才算真健康。
+    """
+    q_name = urllib.parse.quote(prefixed_name, safe="")
+    q_url = urllib.parse.quote(target, safe="")
+    try:
+        # import 放 try 内：探测跑在线程池里，import 失败不能抛到健康循环外中断探测
+        from core_manager import CONTROLLER
+        from config_generator import CONTROLLER_SECRET
+        api = f"{CONTROLLER}/proxies/{q_name}/delay?url={q_url}&timeout={TRANSFER_TIMEOUT_MS}"
+        req = urllib.request.Request(
+            api, headers={"Authorization": f"Bearer {CONTROLLER_SECRET}"}
+        )
+        with urllib.request.urlopen(req, timeout=TRANSFER_TIMEOUT_MS / 1000 + 2) as resp:
+            delay = json.loads(resp.read()).get("delay")
+            return isinstance(delay, (int, float)) and 0 < delay < TRANSFER_TIMEOUT_MS
+    except Exception:
+        return False
+
+
+def health_check(pool: Dict, timeout: float = 3.0) -> Dict:
+    """并发测速所有节点，记录延迟，标记可用/不可用 + 传输探测。
+
+    可用 → healthy=true, fail_count=0, latency_ms=连接耗时
+    不可用 → healthy=false, fail_count+=1
+    传输通过 → transfer_ok=true（auto 组只收这类）
+
+    Args:
+        pool: 本地池子数据
+        timeout: 阶段1每个节点的连接超时
+
+    Returns:
+        更新后的池子
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    proxies = pool.get("proxies", [])
+    name_map = {p["name"]: p for p in proxies}
+
+    healthy_count = 0
+    unhealthy_count = 0
+    latencies = []
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(_check_one, entry, timeout): entry["name"]
+            for entry in proxies
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                _, is_healthy, latency_ms = future.result()
+            except Exception:
+                is_healthy, latency_ms = False, None
+
+            entry = name_map.get(name)
+            if not entry:
+                continue
+
+            entry["last_checked"] = now
+            if is_healthy:
+                entry["healthy"] = True
+                entry["fail_count"] = 0
+                entry["latency_ms"] = round(latency_ms, 1) if latency_ms else None
+                if entry.get("latency_ms"):
+                    latencies.append(entry["latency_ms"])
+                healthy_count += 1
+            else:
+                entry["healthy"] = False
+                entry["fail_count"] = entry.get("fail_count", 0) + 1
+                entry["latency_ms"] = None
+                unhealthy_count += 1
+
+    # 阶段2: 传输探测（经 mihomo 按节点测速，环形窗口，多轮覆盖全部健康节点）
+    # 只测当前配置里存在的节点——不在配置里的节点 mihomo 会回 404，误标 False
+    global _probe_round
+    _probe_round += 1
+    healthy_entries = [e for e in proxies if e.get("healthy")]
+    config_names = _load_config_proxy_names()
+    n = len(healthy_entries)
+    if n > 0:
+        start = (_probe_round * TRANSFER_PROBE_CAP) % n
+        batch = (healthy_entries + healthy_entries)[start:start + TRANSFER_PROBE_CAP]
+        batch = [e for e in batch if _prefixed_name(e) in config_names]
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {}
+            for e in batch:
+                name = _prefixed_name(e)
+                futures[executor.submit(_probe_url, name, TRANSFER_URL)] = (e, "transfer_ok")
+                futures[executor.submit(_probe_url, name, BINANCE_URL)] = (e, "binance_ok")
+            for f in as_completed(futures):
+                entry, key = futures[f]
+                entry[key] = f.result()
+        yt_ok = sum(1 for e in healthy_entries if e.get("transfer_ok"))
+        bn_ok = sum(1 for e in healthy_entries if e.get("binance_ok"))
+        logger.info(
+            "传输探测(经mihomo): YouTube %d 真健康, binance %d 真健康 (%d 健康节点中, 探测 %d)",
+            yt_ok, bn_ok, n, len(batch),
+        )
+
+    pool["last_updated"] = now
+    elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(now)).total_seconds()
+    if latencies:
+        latencies.sort()
+        logger.info(
+            "健康检查完成: %d 可用, %d 不可用 (延迟中位数 %.0fms, p90 %.0fms)",
+            healthy_count, unhealthy_count,
+            latencies[len(latencies)//2], latencies[int(len(latencies)*0.9)],
+        )
+    else:
+        logger.info(
+            "健康检查完成: %d 可用, %d 不可用",
+            healthy_count, unhealthy_count,
+        )
+
+    return pool

@@ -41,6 +41,9 @@ class PreflightChecker:
             return None
         if "canTrade" in acc:
             self.results.append(CheckResult("account_reachable", True, "OK"))
+        else:
+            # 账户响应缺 canTrade 键: 不能静默跳过, 标记为失败
+            self.results.append(CheckResult("account_reachable", False, "missing canTrade"))
         can_trade = acc.get("canTrade", False)
         self.results.append(CheckResult("can_trade", can_trade,
                                         "enabled" if can_trade else "DISABLED"))

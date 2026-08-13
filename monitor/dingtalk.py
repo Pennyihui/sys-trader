@@ -27,6 +27,9 @@ from monitor.alerter import Alert, AlertLevel
 
 logger = logging.getLogger(__name__)
 
+# 钉钉自定义机器人关键词（大小写敏感）: 消息不含该词会被 API 拒绝 (310000)
+_KEYWORD = "[SysTrader]"
+
 
 class DingTalkNotifier:
     """钉钉自定义机器人通知器。"""
@@ -37,6 +40,13 @@ class DingTalkNotifier:
         self.secret = secret
         self.min_level = min_level
         self._level_rank = {AlertLevel.INFO: 0, AlertLevel.WARNING: 1, AlertLevel.CRITICAL: 2}
+
+    def _prefixed(self, message: str) -> str:
+        """统一给消息加 [SysTrader] 关键词前缀（大小写敏感）。
+
+        调用侧可能已加前缀（如 heartbeat_watchdog._dispatch），已含则不重复添加。
+        """
+        return message if _KEYWORD in message else f"{_KEYWORD} {message}"
 
     def _signed_url(self) -> str:
         """如果配置了 secret，生成带签名的完整 URL。"""
@@ -54,10 +64,10 @@ class DingTalkNotifier:
         return f"{self.webhook_url}{sep}timestamp={timestamp}&sign={sign}"
 
     def send(self, message: str) -> bool:
-        """发送纯文本消息。"""
+        """发送纯文本消息（统一加 [SysTrader] 关键词前缀）。"""
         payload = {
             "msgtype": "text",
-            "text": {"content": message},
+            "text": {"content": self._prefixed(message)},
         }
         return self._post(payload)
 

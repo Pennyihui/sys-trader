@@ -43,3 +43,29 @@ class TestPaperTrader:
         fill = trader2.execute(req)
         # 价格应该在 64000 ± 640 范围内
         assert 63360 <= fill.price <= 64640
+
+    def test_stop_market_conditional_not_filled_immediately(self):
+        """条件单 (STOP_MARKET) 不应随市价立即成交, 返回 NEW 挂起"""
+        req = OrderRequest(symbol="BTCUSDT", side="SELL", order_type="STOP_MARKET",
+                           quantity=0.1, stop_price=62000.0, reduce_only=True)
+        fill = self.trader.execute(req)
+        assert fill.status == "NEW"
+        assert fill.executed_qty == 0.0
+
+    def test_take_profit_market_conditional_not_filled_immediately(self):
+        """条件单 (TAKE_PROFIT_MARKET) 不应随市价立即成交, 返回 NEW 挂起"""
+        req = OrderRequest(symbol="BTCUSDT", side="SELL", order_type="TAKE_PROFIT_MARKET",
+                           quantity=0.1, stop_price=68000.0, reduce_only=True)
+        fill = self.trader.execute(req)
+        assert fill.status == "NEW"
+        assert fill.executed_qty == 0.0
+
+    def test_no_price_leaves_order_unfilled(self):
+        """无行情时不成交, 不生成 0 价成交记录"""
+        feed3 = MagicMock()
+        feed3.get_last_price.return_value = None
+        trader3 = PaperTrader(feed=feed3, fill_delay_ms=0, slippage_pct=0.0)
+        req = OrderRequest(symbol="BTCUSDT", side="BUY", order_type="MARKET", quantity=0.1)
+        fill = trader3.execute(req)
+        assert fill.status == "NEW"
+        assert fill.executed_qty == 0.0

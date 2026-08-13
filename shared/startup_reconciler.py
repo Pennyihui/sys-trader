@@ -17,21 +17,26 @@ class StartupReconciler:
         self.portfolio = portfolio
 
     def reconcile(self) -> Dict:
-        """获取交易所持仓并与本地比对，返回差异报告。"""
+        """获取交易所持仓并与本地比对，返回差异报告（存在性 + 数量）。"""
         remote = self._fetch_remote_positions()
-        local = {s: p.quantity for s, p in self.portfolio.positions.items()}
+        # 快照: 运行中 positions 可能被 feed 线程修改, 避免并发改 dict
+        local = {s: p.quantity for s, p in list(self.portfolio.positions.items())}
 
-        diff = {"remote_only": [], "local_only": [], "matched": []}
+        diff = {"remote_only": [], "local_only": [], "qty_mismatch": [], "matched": []}
         for symbol, qty in remote.items():
             if symbol in local:
-                diff["matched"].append(symbol)
+                if abs(qty - local[symbol]) > 0.0001:
+                    diff["qty_mismatch"].append(
+                        {"symbol": symbol, "local": local[symbol], "remote": qty})
+                else:
+                    diff["matched"].append(symbol)
             else:
                 diff["remote_only"].append(symbol)
         for symbol in local:
             if symbol not in remote:
                 diff["local_only"].append(symbol)
 
-        if diff["remote_only"] or diff["local_only"]:
+        if diff["remote_only"] or diff["local_only"] or diff["qty_mismatch"]:
             logger.warning("Position drift detected: %s", diff)
         else:
             logger.info("Position state consistent (%d positions)", len(local))

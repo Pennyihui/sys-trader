@@ -104,3 +104,61 @@ class TestEventBus:
         bus = EventBus(redis_url="redis://127.0.0.1:1")  # 必然失败的端口
         bus.redis.close()  # 强制断连
         assert bus.publish("test.stream", {"k": "v"}) == ""
+
+    def test_consumer_id_is_stable_across_polls(self):
+        """_poll_once 复用固定 consumer_id, 不每次生成新 consumer (防 consumer 膨胀)。"""
+        bus = self.bus
+        with patch.object(bus.redis, "xreadgroup") as mock_read, \
+                patch.object(bus.redis, "xack"), \
+                patch.object(bus.redis, "xautoclaim", return_value=([], "0-0")):
+            mock_read.return_value = []
+            bus._poll_once("kline.closed", "grp", lambda e: None)
+            cid1 = mock_read.call_args[0][1]
+            bus._poll_once("kline.closed", "grp", lambda e: None)
+            cid2 = mock_read.call_args[0][1]
+        assert cid1 == cid2
+        assert cid1.startswith("grp-")
+
+    def test_handler_exception_still_acks(self):
+        """handler 抛异常时消息仍 ACK 并记日志, 避免 PEL 永久滞留。"""
+        bus = self.bus
+        raw = json.dumps({"event_id": "e1", "stream": "kline.closed",
+                          "timestamp": "t", "data": {"symbol": "BTCUSDT"}})
+        with patch.object(bus.redis, "xreadgroup") as mock_read, \
+                patch.object(bus.redis, "xack") as mock_xack, \
+                patch.object(bus.redis, "xautoclaim", return_value=([], "0-0")):
+            mock_read.return_value = [[b"test:kline.closed", [(b"msg-1", {b"payload": raw.encode()})]]]
+
+            def boom(event):
+                raise RuntimeError("handler boom")
+
+            bus._poll_once("kline.closed", "grp", boom)
+        mock_xack.assert_called_once()
+        assert mock_xack.call_args[0][2] == b"msg-1"
+
+    def test_malformed_payload_still_acks(self):
+        """payload 非 JSON 时同样 ACK 并记日志, 不永久滞留 PEL。"""
+        bus = self.bus
+        with patch.object(bus.redis, "xreadgroup") as mock_read, \
+                patch.object(bus.redis, "xack") as mock_xack, \
+                patch.object(bus.redis, "xautoclaim", return_value=([], "0-0")):
+            mock_read.return_value = [[b"test:kline.closed", [(b"msg-2", {b"payload": b"not-json"})]]]
+            bus._poll_once("kline.closed", "grp", lambda e: None)
+        mock_xack.assert_called_once()
+        assert mock_xack.call_args[0][2] == b"msg-2"
+
+    def test_retry_pending_reclaims_and_delivers(self):
+        """XAUTOCLAIM 捞回 PEL 滞留消息并交给 handler (重投)。"""
+        bus = self.bus
+        raw = json.dumps({"event_id": "e1", "stream": "kline.closed",
+                          "timestamp": "t", "data": {"symbol": "BTCUSDT"}})
+        delivered = []
+        with patch.object(bus.redis, "xreadgroup") as mock_read, \
+                patch.object(bus.redis, "xack") as mock_xack, \
+                patch.object(bus.redis, "xautoclaim",
+                             return_value=["0-0", [(b"msg-pending", {b"payload": raw.encode()})], []]):
+            mock_read.return_value = []
+            bus._poll_once("kline.closed", "grp", delivered.append)
+        assert len(delivered) == 1
+        assert delivered[0].data["symbol"] == "BTCUSDT"
+        mock_xack.assert_called_once()

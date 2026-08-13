@@ -1,5 +1,6 @@
 import time
 from enum import Enum
+from typing import Any, Dict
 from risk.chain import Middleware, MiddlewareResult
 from signal_engine.engine import Signal
 from portfolio.tracker import PortfolioTracker
@@ -19,7 +20,8 @@ class DrawdownBreaker(Middleware):
         self.state = BreakerState.ACTIVE
         self._triggered_at: float = 0.0
 
-    def process(self, signal: Signal, portfolio: PortfolioTracker) -> MiddlewareResult:
+    def process(self, signal: Signal, portfolio: PortfolioTracker,
+                modifications: Dict[str, Any] = None) -> MiddlewareResult:
         if self.state == BreakerState.COOLDOWN:
             if time.time() - self._triggered_at >= self.cooldown_seconds:
                 self.state = BreakerState.ACTIVE

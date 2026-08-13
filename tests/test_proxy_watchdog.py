@@ -206,8 +206,12 @@ class TestNotify:
 class TestMakeNotifier:
     def test_no_env_returns_none(self):
         with patch.dict("os.environ", {}, clear=False):
-            from tools.proxy_watchdog import make_notifier
-            assert make_notifier() is None
+            with patch.dict("os.environ", {
+                "DINGTALK_WEBHOOK_URL": "",
+                "DINGTALK_WEBHOOK": "",
+            }):
+                from tools.proxy_watchdog import make_notifier
+                assert make_notifier() is None
 
     def test_with_env_returns_notifier(self):
         with patch.dict("os.environ",

@@ -47,9 +47,10 @@ class TestPositionGuardian:
         assert self.guardian._ensure_atr("BTCUSDT") == 2000.0
 
     def test_tp1_partial_close(self):
-        """达到 TP1 时发 MARKET 单平 50%"""
+        """达到 TP1 时发 MARKET 单平 50% (tp1_ratio 生效), 非全平"""
         self.gateway.place_order.return_value = MagicMock()
         self.gateway.place_order.return_value.status = "FILLED"
+        self.gateway.place_order.return_value.avg_price = 62000.0
 
         pos = Position(symbol="BTCUSDT", direction="LONG",
                        quantity=0.1, entry_price=60000.0, leverage=3)
@@ -61,7 +62,32 @@ class TestPositionGuardian:
         self.feed.get_last_price.return_value = 62000.0
         self.guardian._check_positions()
         assert self.guardian._position_state["BTCUSDT"].tp1_done is True
-        self.gateway.place_order.assert_called()
+        # 只平 50%: 下单价量 = 0.1 * 0.5 = 0.05
+        req = self.gateway.place_order.call_args[0][0]
+        assert req.quantity == pytest.approx(0.05, abs=0.0001)
+        # 持仓数量同步减半, 未全平
+        assert self.tracker.positions["BTCUSDT"].quantity == pytest.approx(0.05, abs=0.0001)
+        assert self.tracker.positions["BTCUSDT"] is pos
+
+    def test_tp1_then_tp2_closes_remaining(self):
+        """TP1 平半后价格继续走高, TP2 平剩余全部并移除持仓"""
+        self.gateway.place_order.return_value = MagicMock()
+        self.gateway.place_order.return_value.status = "FILLED"
+        self.gateway.place_order.return_value.avg_price = 68000.0
+
+        pos = Position(symbol="BTCUSDT", direction="LONG",
+                       quantity=0.1, entry_price=60000.0, leverage=3)
+        self.tracker.open_position(pos)
+        self.guardian._position_state["BTCUSDT"] = PositionState(
+            symbol="BTCUSDT", direction="LONG", entry_price=60000.0,
+            highest_price=60000.0, current_stop=58000.0,
+        )
+        # 直接触发 TP2 路径 (pnl 13.3% > tp2_pct 6%): TP1 先平半, TP2 平剩余
+        self.feed.get_last_price.return_value = 68000.0
+        self.guardian._check_tp(self.guardian._position_state["BTCUSDT"], 68000.0)
+        state = self.guardian._position_state["BTCUSDT"]
+        assert state.tp1_done and state.tp2_done
+        assert "BTCUSDT" not in self.tracker.positions
 
     def test_init_atr_default_when_no_kline(self):
         """没K线数据时 ATR 默认值 500"""

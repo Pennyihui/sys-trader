@@ -44,3 +44,20 @@ class TestRetrier:
         with pytest.raises(ValueError):
             fn()
         assert len(calls) == 1  # 不重试
+
+    def test_max_retries_zero_runs_once_and_raises_original(self):
+        """max_retries=0: 执行一次不重试, 异常原样抛出 (不 raise None)。"""
+        calls = []
+        @retrier(max_retries=0)
+        def fn():
+            calls.append(1)
+            raise ValueError("boom")
+        with pytest.raises(ValueError):
+            fn()
+        assert len(calls) == 1
+
+    def test_max_retries_negative_runs_once_on_success(self):
+        @retrier(max_retries=-1)
+        def fn():
+            return "ok"
+        assert fn() == "ok"

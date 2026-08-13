@@ -39,6 +39,16 @@ def fresh_iso(seconds_ago: float = 2.0) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
 
 
+def make_module_entry(timestamp_iso, modules: dict, instance: str = "live"):
+    """带 modules 字段的 heartbeat 消息 (与真实 EventBus envelope 一致: modules 在 data 内)。"""
+    payload = json.dumps({
+        "event_id": "evt-1", "stream": "heartbeat",
+        "timestamp": timestamp_iso,
+        "data": {"instance": instance, "modules": modules},
+    })
+    return ["1786545281775-0", {"payload": payload}]
+
+
 @pytest.mark.unit
 def test_last_event_age_parses_payload_timestamp():
     """payload 的 ISO timestamp（EventBus envelope 字段）→ age 正确。"""
@@ -61,6 +71,47 @@ def test_empty_stream_means_stale():
     watchdog = HeartbeatWatchdog(redis_client=FakeRedis([]))
     assert watchdog.last_event_age() == float("inf")
     assert watchdog.check_once() == "stale"
+
+
+@pytest.mark.unit
+def test_last_event_age_prefers_runner_module_age():
+    """payload.modules.runner 的 age 优先于 payload.timestamp。
+
+    主循环停摆时发布线程仍在发 heartbeat (timestamp 新鲜), 但 runner age 会真实增长。
+    """
+    fake = FakeRedis([make_module_entry(fresh_iso(), {"runner": 500.0, "market_data": 1.0})])
+    watchdog = HeartbeatWatchdog(redis_client=fake, stale_after=60.0)
+    assert 499.0 <= watchdog.last_event_age() <= 500.0
+    assert watchdog.check_once() == "stale"
+
+
+@pytest.mark.unit
+def test_last_event_age_falls_back_to_market_data():
+    """无 runner 模块时兜底 market_data 的 age。"""
+    fake = FakeRedis([make_module_entry(fresh_iso(), {"market_data": 30.0})])
+    watchdog = HeartbeatWatchdog(redis_client=fake, stale_after=60.0)
+    assert 29.0 <= watchdog.last_event_age() <= 30.0
+
+
+@pytest.mark.unit
+def test_instance_filter_skips_other_instance_events():
+    """instance="live" 时跳过较新的 paper 事件, 只看指定实例 (跨实例误报修复)。"""
+    entries = [
+        make_module_entry(fresh_iso(), {"runner": 1.0}, instance="paper"),  # 最新但属于 paper
+        make_module_entry(iso_hours_ago(1), {}, instance="live"),           # live 事件 (无 modules, 回退 timestamp)
+    ]
+    fake = FakeRedis(entries)
+    watchdog = HeartbeatWatchdog(redis_client=fake, instance="live", stale_after=60.0)
+    assert 3590.0 < watchdog.last_event_age() < 3610.0  # 取的是 1h 前的 live 事件
+    assert watchdog.check_once() == "stale"
+
+
+@pytest.mark.unit
+def test_instance_none_keeps_unfiltered_behavior():
+    """instance=None (默认) 不过滤, 保持原有单实例行为。"""
+    fake = FakeRedis([make_module_entry(fresh_iso(), {"runner": 1.0}, instance="paper")])
+    watchdog = HeartbeatWatchdog(redis_client=fake, stale_after=60.0)
+    assert watchdog.last_event_age() < 5.0
 
 
 @pytest.mark.unit
@@ -203,6 +254,36 @@ def test_closes_stall_recovers_when_closes_grow():
     watchdog.check_once()
     assert watchdog.closes_state == "normal"
     assert notifier.send.call_count == 2  # 告警 1 + 恢复 1, 无多余
+
+
+@pytest.mark.unit
+def test_closes_drop_treated_as_restart_not_stall():
+    """kline_closes 下降 (runner 重启清零) → 重置基线, 不误报"无增长"。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(), {"kline_closes": 100})])
+    watchdog, notifier = _watchdog_with_notifier(fake, closes_stall_minutes=15)
+    watchdog.check_once()                       # 首次观察播种基线 100
+    watchdog._last_closes_change_ts -= 16 * 60  # 模拟已 16 分钟无增长
+    fake.entries = [make_stats_entry(fresh_iso(), {"kline_closes": 3})]  # 重启清零
+    watchdog.check_once()
+    assert notifier.send.call_count == 0        # 不告警停滞
+    assert watchdog.closes_state == "normal"
+    assert watchdog._last_closes_value == 3     # 基线已重置
+
+
+@pytest.mark.unit
+def test_closes_drop_while_stale_recovers():
+    """停滞中 closes 下降 (重启) → 视为恢复并重置基线。"""
+    fake = FakeRedis([make_stats_entry(fresh_iso(), {"kline_closes": 10})])
+    watchdog, notifier = _watchdog_with_notifier(fake, closes_stall_minutes=15)
+    watchdog.check_once()
+    watchdog._last_closes_change_ts -= 16 * 60
+    watchdog.check_once()
+    assert watchdog.closes_state == "closes_stale"   # 已停滞告警
+    assert notifier.send.call_count == 1
+    fake.entries = [make_stats_entry(fresh_iso(), {"kline_closes": 2})]  # 重启清零
+    watchdog.check_once()
+    assert watchdog.closes_state == "recovered"      # 视为恢复
+    assert "恢复" in notifier.send.call_args[0][0]
 
 
 @pytest.mark.unit

@@ -57,6 +57,28 @@ class TestRiskChain:
         result = check.process(signal, self.tracker)
         assert result.rejected
 
+    def test_concentration_counts_proposed_margin(self):
+        """本次拟开仓保证金计入 per-symbol 判断 (不再只看存量)。"""
+        tracker = PortfolioTracker(initial_equity=1000.0)
+        # 已有持仓保证金 280 (28%), 拟开仓名义价值按上限 100 USDT 计 → +33.33 保证金
+        tracker.open_position(Position(symbol="BTCUSDT", direction="LONG",
+                                       quantity=0.01344, entry_price=62500.0, leverage=3))
+        check = ConcentrationCheck(max_per_symbol=0.30)
+        signal = Signal("BTCUSDT", "LONG", 0.80, 64000.0, 62000.0, 68000.0)
+        result = check.process(signal, tracker, {"position_size": 0.1})
+        assert result.rejected
+        assert "BTCUSDT" in result.reason
+
+    def test_concentration_without_proposed_margin_passes(self):
+        """无拟开仓数量时只按存量判断, 28% 不超 30%。"""
+        tracker = PortfolioTracker(initial_equity=1000.0)
+        tracker.open_position(Position(symbol="BTCUSDT", direction="LONG",
+                                       quantity=0.01344, entry_price=62500.0, leverage=3))
+        check = ConcentrationCheck(max_per_symbol=0.30)
+        signal = Signal("BTCUSDT", "LONG", 0.80, 64000.0, 62000.0, 68000.0)
+        result = check.process(signal, tracker, {})
+        assert not result.rejected
+
     def test_chain_processes_all_middleware_in_order(self):
         self.chain.add(PositionSizer(risk_per_trade=0.015))
         self.chain.add(DailyLossLimit(daily_loss_limit=0.05))

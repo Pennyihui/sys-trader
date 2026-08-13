@@ -49,7 +49,8 @@ class PositionReconciler:
 
     def reconcile(self, cached_account: Optional[Dict] = None) -> ReconcileReport:
         remote = self._fetch_remote(cached_account)
-        local = {s: p.quantity for s, p in self.portfolio.positions.items()}
+        # 快照: feed 线程可能在迭代期间写 positions (open_position), 避免并发改 dict
+        local = {s: p.quantity for s, p in list(self.portfolio.positions.items())}
         diff = {"remote_only": [], "local_only": [], "qty_mismatch": []}
         for sym, qty in remote.items():
             if sym in local:

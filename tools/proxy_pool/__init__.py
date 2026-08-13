@@ -1,0 +1,1 @@
+"""Proxy Pool Manager - 代理池管理，确保 auto-failover 组永远有可用节点。"""

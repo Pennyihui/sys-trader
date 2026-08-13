@@ -14,7 +14,7 @@ def retrier(max_retries: int = 3, backoff: float = 1.0, jitter: float = 0.1,
     """指数退避重试装饰器。
 
     Args:
-        max_retries: 最大重试次数
+        max_retries: 最大重试次数 (<1 时执行一次不重试, 异常原样抛出)
         backoff: 基础退避秒数 (2^n * backoff)
         jitter: 抖动比例
         retry_on: 需要重试的异常类型元组，默认 (Exception,)
@@ -24,6 +24,9 @@ def retrier(max_retries: int = 3, backoff: float = 1.0, jitter: float = 0.1,
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # max_retries<1: 执行一次不重试, 异常原样抛出 (避免 raise last_error=None)
+            if max_retries < 1:
+                return func(*args, **kwargs)
             last_error = None
             for attempt in range(max_retries):
                 try:

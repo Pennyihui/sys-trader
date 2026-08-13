@@ -50,11 +50,47 @@ class PaperTrader:
 
     def execute(self, req: OrderRequest) -> PaperFill:
         self._next_id += 1
-        current_price = self.feed.get_last_price(req.symbol) or 0.0
+        current_price = self.feed.get_last_price(req.symbol)
 
         # 模拟延迟
         if self.fill_delay_ms > 0:
             time.sleep(self.fill_delay_ms / 1000.0)
+
+        # 条件单 (STOP_MARKET/TAKE_PROFIT_MARKET 等) 不随市价立即成交:
+        # 返回 NEW 未成交状态, 等待真实触发 (与 Algo Order 条件单语义一致)
+        if req.order_type not in ("MARKET", "LIMIT"):
+            logger.info(
+                "[Paper] %s %s %s 条件单挂起等待触发 (stop=%s)",
+                req.side, req.quantity, req.symbol,
+                req.stop_price if req.stop_price is not None else "?",
+            )
+            return PaperFill(
+                order_id=self._next_id,
+                symbol=req.symbol,
+                side=req.side,
+                quantity=req.quantity,
+                price=0.0,
+                status="NEW",
+                executed_qty=0.0,
+                avg_price=0.0,
+            )
+
+        # 无行情时不成交: 以 0 价成交会污染成交记录, 返回 NEW 挂起
+        if current_price is None or current_price <= 0:
+            logger.warning(
+                "[Paper] %s %s %s 无行情, 下单挂起未成交",
+                req.side, req.quantity, req.symbol,
+            )
+            return PaperFill(
+                order_id=self._next_id,
+                symbol=req.symbol,
+                side=req.side,
+                quantity=req.quantity,
+                price=0.0,
+                status="NEW",
+                executed_qty=0.0,
+                avg_price=0.0,
+            )
 
         # 确定成交价
         if req.order_type == "MARKET":

@@ -52,27 +52,30 @@ class PortfolioTracker:
                        "drawdown": self.current_drawdown})
 
     def open_position(self, position: Position):
+        # 先日切重置再累加, 避免跨午夜首笔被清零
+        self._maybe_reset_daily()
         self.positions[position.symbol] = position
         self.trade_count_today += 1
-        self._maybe_reset_daily()
         self._publish({"event": "open", "symbol": position.symbol, "direction": position.direction, "quantity": position.quantity, "entry_price": position.entry_price})
 
     def close_position(self, symbol: str, exit_price: float) -> float:
         pos = self.positions.pop(symbol, None)
         if pos is None:
             return 0.0
+        # 先日切重置再累加 PnL, 避免跨午夜已实现盈亏被清零
+        self._maybe_reset_daily()
         direction_mult = 1 if pos.direction == "LONG" else -1
         pnl = (exit_price - pos.entry_price) * pos.quantity * direction_mult
         self.total_equity += pnl
         self.total_realized_pnl += pnl
         self.daily_realized_pnl += pnl
+        # 连亏统计: 盈利/平本不计入连亏, 仅亏损递增
         if pnl > 0:
             self.consecutive_losses = 0
-        else:
+        elif pnl < 0:
             self.consecutive_losses += 1
         if self.total_equity > self.peak_equity:
             self.peak_equity = self.total_equity
-        self._maybe_reset_daily()
         self._publish({"event": "close", "symbol": symbol, "exit_price": exit_price, "realized_pnl": pnl,
                        "total_equity": self.total_equity, "margin_ratio": self.margin_ratio,
                        "daily_pnl": self.daily_realized_pnl, "drawdown": self.current_drawdown})

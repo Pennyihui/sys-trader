@@ -116,7 +116,9 @@ class ProxyWatchdog:
             logger.info("冷却期内（剩余 %.0fs），跳过重复切换/告警", remaining)
             return
         switched = self.switch_node()
-        self._last_action_ts = time.time()
+        # 仅切换成功才更新冷却时间戳——失败时要能尽快重试（300s 冷却会拖慢恢复）
+        if switched:
+            self._last_action_ts = time.time()
         notified = self.notify(result, switched)
         result.update(triggered=True, switched=switched, notified=notified)
 

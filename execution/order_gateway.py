@@ -99,6 +99,18 @@ class OrderGateway:
             self.api_secret.encode(), query.encode(), hashlib.sha256
         ).hexdigest()
 
+    @staticmethod
+    def _fmt_qty(qty: float) -> str:
+        """格式化数量为固定小数位字符串, 避免极小值走科学计数法。
+
+        Binance 拒绝 "8e-05" 这类指数记法 (STRATEGY_PARAM_INVALID),
+        需以纯十进制提交 (如 "0.00008")。format(qty, 'f') 输出固定小数,
+        再去除尾部无意义的 0。
+        """
+        if not qty:
+            return "0"
+        return format(qty, "f").rstrip("0").rstrip(".")
+
     def _sync_server_time(self):
         """从 /fapi/v1/time 校准本机与服务器时钟偏移（Binance 官方推荐）。
 
@@ -178,7 +190,7 @@ class OrderGateway:
             "symbol": req.symbol,
             "side": req.side,
             "type": req.order_type,
-            "quantity": str(req.quantity),
+            "quantity": self._fmt_qty(req.quantity),
         }
         if req.price is not None:
             params["price"] = str(req.price)
@@ -222,7 +234,7 @@ class OrderGateway:
             "type": req.order_type,
         }
         if req.quantity > 0:
-            params["quantity"] = str(req.quantity)
+            params["quantity"] = self._fmt_qty(req.quantity)
         if req.trigger_price is not None:
             params["triggerPrice"] = str(req.trigger_price)
         if req.reduce_only:

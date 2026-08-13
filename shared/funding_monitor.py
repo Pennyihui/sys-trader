@@ -19,10 +19,13 @@ class FundingRateMonitor:
     """监控实盘资金费率，计算持仓成本，超阈值告警。"""
 
     def __init__(self, portfolio, cost_threshold: float = 1.0,
-                 on_alert: Optional[Callable] = None):
+                 on_alert: Optional[Callable] = None,
+                 price_fn: Optional[Callable[[str], Optional[float]]] = None):
         self.portfolio = portfolio
         self.cost_threshold = cost_threshold
         self.on_alert = on_alert or (lambda msg: None)
+        # 实时价回调 (如 feed.get_last_price), 缺省时回退 entry_price 计价
+        self.price_fn = price_fn
         self.tracker = FundingRateTracker()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -40,12 +43,17 @@ class FundingRateMonitor:
             return None
 
     def check_positions(self):
-        """计算所有持仓的资金成本，超阈值告警。"""
+        """计算所有持仓的资金成本，超阈值告警。
+
+        资金费基数使用实时价 (price_fn 注入时)，无实时价时回退 entry_price，
+        避免长期持仓成本按陈旧开仓价低估。
+        """
         for symbol, pos in self.portfolio.positions.items():
             rate = self.fetch_rate(symbol)
             if rate is None:
                 continue
-            value = pos.quantity * pos.entry_price
+            live_price = self.price_fn(symbol) if self.price_fn else None
+            value = pos.quantity * (live_price if live_price else pos.entry_price)
             cost = self.tracker.estimate_cost(symbol, value, hours=8)
             if cost >= self.cost_threshold:
                 msg = f"Funding cost {symbol}: {cost:.2f} USDT/8h (rate={rate:.4%})"

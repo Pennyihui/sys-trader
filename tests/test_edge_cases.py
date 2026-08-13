@@ -39,16 +39,17 @@ class TestGuardianEdgeCases:
         assert "ETHUSDT" in self.guardian._position_state
 
     def test_partial_close_then_tp2(self):
-        """TP1 之后 TP2 应该用剩余数量"""
+        """TP1 之后 TP2 应该用剩余数量（TP1 已缩减 pos.quantity）"""
         self.feed.get_last_price.return_value = 64000.0
-        pos = Position("BTCUSDT", "LONG", 0.1, 60000.0, 3)
+        # TP1 已平 0.05 后, pos.quantity 应同步缩减为剩余 0.05
+        pos = Position("BTCUSDT", "LONG", 0.05, 60000.0, 3)
         self.tracker.open_position(pos)
         self.guardian._position_state["BTCUSDT"] = PositionState(
             "BTCUSDT", "LONG", 60000.0, 60000.0, 58000.0,
             tp1_done=True, closed_qty=0.05,
         )
         self.guardian._check_tp(self.guardian._position_state["BTCUSDT"], 64000.0)
-        # 检查 TP2 的 quantity 不应超过剩余 (0.1 - 0.05 = 0.05)
+        # 检查 TP2 的 quantity 不应超过剩余 (0.05)
         calls = self.gateway.place_order.call_args_list
         if calls:
             qty = calls[-1][0][0].quantity

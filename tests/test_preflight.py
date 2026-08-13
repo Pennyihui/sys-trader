@@ -42,3 +42,13 @@ class TestPreflight:
         checker = PreflightChecker(gw)
         checker.run_all()
         assert gw.get_account.call_count == 1
+
+    def test_missing_can_trade_key_marks_reachable_failed(self):
+        """账户响应缺 canTrade 键: account_reachable 标记失败, 不静默跳过。"""
+        gw = MagicMock()
+        gw.get_account.return_value = {"assets": [{"asset": "USDT", "walletBalance": "10000"}]}
+        checker = PreflightChecker(gw)
+        assert checker.run_all() is None
+        passed = {r.name: r.passed for r in checker.results}
+        assert passed["account_reachable"] is False
+        assert passed["can_trade"] is False

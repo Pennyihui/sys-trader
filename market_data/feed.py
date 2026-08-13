@@ -10,6 +10,7 @@ import json
 import threading
 import logging
 import time
+from collections import OrderedDict
 from typing import Callable, Dict, List, Optional
 from market_data.kline_buffer import KlineBuffer, Kline
 from monitor.collector import MetricsCollector
@@ -71,13 +72,21 @@ class MarketDataFeed:
         self._conns: List[_ConnState] = []
         self._primary_idx = 0
         self._lock = threading.Lock()
+        # 已触发 on_kline_closed 的 (symbol, timeframe, open_time)，LRU 去重。
+        # 备用连接也会把闭合 K 线写入 buffer，若用 buffer 的 is_closed 判断，
+        # 主连接会因备用先写入而漏触发回调，故此处单独跟踪已通知项。
+        self._closed_notified: "OrderedDict" = OrderedDict()
+        self._notified_max = 5000
         self._stream_url = self._build_stream_url()
 
     # ─── Stream URL ───
 
     def _build_stream_url(self) -> str:
-        """构建 combined stream URL。"""
-        base = "wss://fstream.binance.com/market/stream?streams="
+        """构建 combined stream URL（testnet 走 stream.binancefuture.com）。"""
+        if self.testnet:
+            base = "wss://stream.binancefuture.com/stream?streams="
+        else:
+            base = "wss://fstream.binance.com/market/stream?streams="
         streams = []
         for sym in self.symbols:
             s = sym.lower()
@@ -111,30 +120,33 @@ class MarketDataFeed:
 
     # ─── 消息处理 ───
 
-    def _on_message(self, raw: str):
-        """combined stream 回调入口。"""
+    def _on_message(self, raw: str, notify_closed: bool = True):
+        """combined stream 回调入口。notify_closed 仅主连接为 True。"""
         data = json.loads(raw)
         inner = data.get("data", data)
         event = inner.get("e", "")
         if event == "kline":
-            self._on_kline_message(inner)
+            self._on_kline_message(inner, notify_closed=notify_closed)
         elif event == "markPriceUpdate":
             self._on_mark_price_message(inner)
         elif event == "aggTrade":
             self._on_agg_trade_message(inner)
 
     def _on_message_wrapper(self, conn_id: int, raw: str):
-        """消息分发：只有主连接的消息才处理（CPython 下 int 读原子安全）。"""
+        """消息分发：所有连接都处理 kline/markPrice/aggTrade 写入共享 buffer 与
+        价格缓存（备用连接始终维持最新数据，切主后无缝、无需回填）；
+        仅主连接触发 kline 闭合回调与模块心跳。
+        """
         # 每条连接（含备用）都记录最后消息时间，供断连诊断
         if conn_id < len(self._conns):
             self._conns[conn_id].last_msg_ts = time.time()
-        if conn_id != self._primary_idx:
-            return
-        # 模块心跳: 主连接有消息到达即视为 feed 存活
-        MetricsCollector.instance().heartbeat("market_data")
-        self._on_message(raw)
+        is_primary = conn_id == self._primary_idx
+        if is_primary:
+            # 模块心跳: 主连接有消息到达即视为 feed 存活
+            MetricsCollector.instance().heartbeat("market_data")
+        self._on_message(raw, notify_closed=is_primary)
 
-    def _on_kline_message(self, msg: dict):
+    def _on_kline_message(self, msg: dict, notify_closed: bool = True):
         k = msg.get("k", {})
         symbol = msg.get("s", "").upper()
         interval = k.get("i", "4h")
@@ -152,10 +164,17 @@ class MarketDataFeed:
             volume=float(k.get("v", 0)),
             is_closed=k.get("x", False),
         )
-        prev_closed = self.buffer.is_closed(symbol, timeframe, kline.open_time)
         self.buffer.add(kline)
 
-        if kline.is_closed and not prev_closed:
+        if notify_closed and kline.is_closed:
+            key = (symbol, timeframe, kline.open_time)
+            with self._lock:
+                if key in self._closed_notified:
+                    return
+                self._closed_notified[key] = None
+                self._closed_notified.move_to_end(key)
+                if len(self._closed_notified) > self._notified_max:
+                    self._closed_notified.popitem(last=False)
             ohlcv = self.buffer.get_klines(symbol, timeframe, limit=100)
             self.on_kline_closed(symbol, timeframe, ohlcv)
 
@@ -205,7 +224,11 @@ class MarketDataFeed:
     # ─── 主连接切换 ───
 
     def _try_switch_primary(self, failed_idx: int):
-        """主连接断开时，切换到下一个可用的备用连接，并回填错过的数据。"""
+        """主连接断开时，切换到下一个可用的备用连接。
+
+        备用连接一直在把消息写入共享 buffer/价格缓存，
+        因此切换后数据已就绪，无需额外回填，无缝衔接。
+        """
         with self._lock:
             if failed_idx != self._primary_idx:
                 return  # 已经不是主连接了，忽略
@@ -235,7 +258,10 @@ class MarketDataFeed:
 
         if timeframes is None:
             timeframes = ["15m", "1h", "4h", "1d", "1w"]
-        base_url = "https://fapi.binance.com/fapi/v1/klines"
+        if self.testnet:
+            base_url = "https://testnet.binancefuture.com/fapi/v1/klines"
+        else:
+            base_url = "https://fapi.binance.com/fapi/v1/klines"
         proxies = {"http": f"http://{self.proxy_host}:{self.proxy_port}",
                    "https": f"http://{self.proxy_host}:{self.proxy_port}"}
         for symbol in self.symbols:
@@ -248,13 +274,15 @@ class MarketDataFeed:
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                    for row in data:
+                    for i, row in enumerate(data):
+                        # 最后一条是当前未闭合的 K 线，其余已闭合
                         kline = Kline(
                             symbol=symbol, timeframe=tf,
                             open_time=row[0], close_time=row[6],
                             open=float(row[1]), high=float(row[2]),
                             low=float(row[3]), close=float(row[4]),
-                            volume=float(row[5]), is_closed=True,
+                            volume=float(row[5]),
+                            is_closed=(i < len(data) - 1),
                         )
                         self.buffer.add(kline)
                     logger.info("Backfilled %s %s: %d klines", symbol, tf, len(data))
@@ -321,8 +349,9 @@ class MarketDataFeed:
                     http_proxy_host=self.proxy_host,
                     http_proxy_port=conn_port,
                     proxy_type="http",
-                    ping_interval=30,
-                    ping_timeout=10,
+                    # 代理延迟可达 6-10s+，ping_timeout 需能容忍波动，避免误判假死
+                    ping_interval=20,
+                    ping_timeout=30,
                 )
             except Exception as e:
                 logger.error("Conn %d exception: %s", conn_id, e)

@@ -165,6 +165,14 @@ class TestCheckHeartbeat:
         assert ok is False
         assert "无消息" in detail
 
+    def test_heartbeat_future_timestamp_fails(self, fake_redis):
+        """心跳时间在未来 (时钟漂移) → FAIL, 不因负 age 直接通过。"""
+        ts = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        fake_redis(FakeRedis(messages=_payload_msg(ts)))
+        ok, detail = preflight.check_heartbeat()
+        assert ok is False
+        assert "时钟" in detail
+
 
 class TestSummarize:
     def test_summary_exit_code_all_pass(self):

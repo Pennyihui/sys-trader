@@ -57,13 +57,15 @@ class HeartbeatWatchdog:
                  stream_key: str = HEARTBEAT_STREAM,
                  notify_recovery: bool = True,
                  closes_stall_minutes: float = 15.0,
-                 fail_rate_threshold: float = 0.10):
+                 fail_rate_threshold: float = 0.10,
+                 instance: Optional[str] = None):
         self.redis_url = redis_url
         self.stale_after = stale_after
         self.interval = interval
         self.notifier = notifier
         self.stream_key = stream_key
         self.notify_recovery = notify_recovery
+        self.instance = instance  # None=不过滤 (单实例兼容), "live"/"paper"=只统计该实例
         self.redis = redis_client if redis_client is not None \
             else redis.Redis.from_url(redis_url, decode_responses=True)
         self._state = "normal"
@@ -82,29 +84,72 @@ class HeartbeatWatchdog:
         """xrevrange 的 fields 值可能是 bytes（decode_responses=False 时），双保险 decode。"""
         return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
 
-    def _last_event_payload(self) -> Optional[dict]:
-        """读取 heartbeat 流最后一条消息的 payload（EventBus envelope dict）。
+    def _last_event_payload(self, max_scan: int = 50) -> Optional[dict]:
+        """读取 heartbeat 流最后一条（符合 instance 过滤的）消息的 payload。
 
-        流为空 / payload 缺失 / 非 JSON → None（fail-safe）。
+        流为空 / 全部消息均无有效 payload → None（fail-safe）。
+        instance 非 None 时从最新向前扫描，跳过其他实例的事件
+        （live/paper 双实例写同一流, 跨实例统计会误报）；max_scan 限制扫描深度。
         Redis 不可达时抛出异常，由调用方（run_forever）捕获，watchdog 不崩溃。
         """
-        entries = self.redis.xrevrange(self.stream_key, count=1)
+        entries = self.redis.xrevrange(self.stream_key, count=max_scan)
         if not entries:
             return None
-        payload_raw = self._decode(entries[0][1].get("payload", ""))
-        try:
-            return json.loads(payload_raw)
-        except (ValueError, TypeError):
+        for _msg_id, fields in entries:
+            payload_raw = self._decode(fields.get("payload", ""))
+            try:
+                payload = json.loads(payload_raw)
+            except (ValueError, TypeError):
+                continue
+            if self.instance is None:
+                return payload
+            # instance 标识可能嵌在 EventBus 双层 envelope 的 data 内, 或顶层
+            ev_instance = None
+            data = payload.get("data")
+            if isinstance(data, dict):
+                ev_instance = data.get("instance")
+            if ev_instance is None:
+                ev_instance = payload.get("instance")
+            if ev_instance == self.instance:
+                return payload
+        return None
+
+    def _module_age(self, payload: dict) -> Optional[float]:
+        """取 payload 内主循环模块 (runner, 兜底 market_data) 的 heartbeat age。
+
+        无 modules / 无相关模块 → None（回退 timestamp 判定）。
+        modules 为 {module: age_seconds}, 由 HeartbeatPublisher 基于
+        MetricsCollector.heartbeat_ages() 发布。
+        """
+        modules = None
+        data = payload.get("data")
+        if isinstance(data, dict):
+            modules = data.get("modules")
+        if not isinstance(modules, dict):
+            modules = payload.get("modules")
+        if not isinstance(modules, dict):
             return None
+        for mod in ("runner", "market_data"):
+            age = modules.get(mod)
+            if isinstance(age, (int, float)) and age >= 0:
+                return float(age)
+        return None
 
     def last_event_age(self) -> float:
-        """读取 heartbeat 流最后一条消息的 payload.timestamp，返回距现在的秒数。
+        """返回心跳事件距现在的时间, 用于停滞判定。
 
-        流为空 / payload 缺失 / 时间戳不可解析 → 返回 float("inf")（fail-safe: 视为停滞）。
+        优先用 payload.modules 内 runner/market_data 的 age: 该 age 由各模块
+        主循环自行打点, 主循环停摆时即使发布线程仍在发 heartbeat (timestamp
+        始终新鲜), runner age 也会真实增长。无 modules 时回退到 payload.timestamp。
+
+        流为空 / payload 缺失 / 时间戳不可解析 → 返回 float("inf")（fail-safe）。
         """
         payload = self._last_event_payload()
         if not payload:
             return float("inf")
+        module_age = self._module_age(payload)
+        if module_age is not None:
+            return max(0.0, module_age)
         ts_raw = self._decode(payload.get("timestamp", ""))
         try:
             ts = datetime.fromisoformat(ts_raw)
@@ -168,10 +213,20 @@ class HeartbeatWatchdog:
 
     # ── Ops T5: stats 维度检测 (K线闭合停滞 / 订单失败率) ──
 
+    def _closes_recovered(self):
+        """closes 维度从停滞恢复: 发恢复通知（如启用）并置 recovered 状态。"""
+        if self.closes_state == "closes_stale":
+            if self.notify_recovery:
+                self._dispatch(self._closes_recovery_message())
+            self.closes_state = "recovered"
+        else:
+            self.closes_state = "normal"
+
     def _check_closes_stall(self, stats: Optional[dict]):
         """kline_closes 超过 closes_stall_minutes 无增长 → 告警（状态机, 告警一次）。
 
         首次观察只播种基线不告警；恢复增长 → 恢复通知一次 → normal。
+        值下降（runner 重启后计数清零）→ 视为重启, 重置基线, 不误报"无增长"。
         stats 缺失（旧版 runner 未发布）→ 该维度不评估, 不误报。
         """
         if not stats or not isinstance(stats, dict):
@@ -180,15 +235,22 @@ class HeartbeatWatchdog:
         if not isinstance(closes, (int, float)):
             return
         now = time.time()
-        if self._last_closes_value is None or closes > self._last_closes_value:
+        if self._last_closes_value is None:
             self._last_closes_value = closes
             self._last_closes_change_ts = now
-            if self.closes_state == "closes_stale":
-                if self.notify_recovery:
-                    self._dispatch(self._closes_recovery_message())
-                self.closes_state = "recovered"
-            else:
-                self.closes_state = "normal"
+            self._closes_recovered()
+            return
+        if closes > self._last_closes_value:
+            self._last_closes_value = closes
+            self._last_closes_change_ts = now
+            self._closes_recovered()
+        elif closes < self._last_closes_value:
+            # 值下降 = runner 重启后计数清零, 重置基线而非误报"无增长"
+            logger.info("kline_closes 下降 %s→%s, 视为重启, 重置基线",
+                        self._last_closes_value, closes)
+            self._last_closes_value = closes
+            self._last_closes_change_ts = now
+            self._closes_recovered()
         elif now - self._last_closes_change_ts > self.closes_stall_minutes * 60:
             if self.closes_state != "closes_stale":
                 self._dispatch(

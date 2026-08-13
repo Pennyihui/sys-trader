@@ -65,6 +65,35 @@ class TestPortfolioTracker:
         self.tracker.close_position("BTCUSDT", 63000.0)
         assert self.tracker.daily_realized_pnl > 0
 
+    def test_break_even_does_not_count_as_loss(self):
+        """平本 (pnl==0) 不计入连亏。"""
+        self.tracker.consecutive_losses = 2
+        pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
+        self.tracker.open_position(pos)
+        self.tracker.close_position("BTCUSDT", 60000.0)
+        assert self.tracker.consecutive_losses == 2
+
+    def test_loss_increments_consecutive_losses(self):
+        pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
+        self.tracker.open_position(pos)
+        self.tracker.close_position("BTCUSDT", 59000.0)
+        assert self.tracker.consecutive_losses == 1
+
+    def test_daily_reset_before_increment(self):
+        """日切重置先于累加: 跨午夜首笔开/平仓不被清零。"""
+        self.tracker.daily_realized_pnl = 50.0
+        self.tracker.trade_count_today = 3
+        self.tracker._last_reset_day = self.tracker._last_reset_day - 1  # 模拟跨日
+        pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
+        self.tracker.open_position(pos)
+        # 跨日重置后当日计数从 1 开始, 旧计数 3 已被清零
+        assert self.tracker.trade_count_today == 1
+        self.tracker._last_reset_day = self.tracker._last_reset_day - 1  # 再模拟跨日
+        self.tracker.close_position("BTCUSDT", 61000.0)
+        # 跨日重置后当日已实现盈亏仅包含本次平仓
+        assert self.tracker.daily_realized_pnl > 0
+        assert self.tracker.daily_realized_pnl < 300.0
+
 
 @pytest.mark.unit
 def test_publishes_position_changed_on_open():

@@ -130,9 +130,24 @@ class PositionGuardian:
 
     # ─── 部分止盈 ───
 
+    def _fill_price(self, resp, fallback: float) -> float:
+        """从成交响应安全提取成交价, 无有效值时回退到当前价。"""
+        avg = getattr(resp, "avg_price", None)
+        try:
+            avg = float(avg)
+        except (TypeError, ValueError):
+            avg = 0.0
+        return avg if avg > 0 else (fallback or 0.0)
+
     def _exec_tp_tier(self, state: PositionState, pos, pnl_pct, threshold,
-                      attempt_attr, done_attr, label):
-        """执行单层止盈，基于 closed_qty 跟踪已平仓量避免超卖。"""
+                      attempt_attr, done_attr, label, ratio=None,
+                      current_price: float = None):
+        """执行单层止盈。
+
+        ratio 非 None (TP1): 平掉 pos.quantity * ratio (部分止盈)
+        ratio None (TP2): 平掉剩余全部仓位
+        成交后同步 portfolio.positions 的 quantity, 全部平掉时移除持仓。
+        """
         now = time.time()
         attempt_ts = getattr(state, attempt_attr, 0.0)
         if getattr(state, done_attr) or pnl_pct < threshold:
@@ -140,21 +155,40 @@ class PositionGuardian:
         if now - attempt_ts < 60:
             return
         setattr(state, attempt_attr, now)
-        remaining = pos.quantity - state.closed_qty
-        if remaining <= 0:
-            return
-        qty = round(remaining, 4)
+        if ratio is not None:
+            qty = round(pos.quantity * ratio, 4)
+        else:
+            # TP2: 平剩余全部 — pos.quantity 已随部分止盈缩减, 即当前剩余量
+            qty = round(pos.quantity, 4)
         if qty <= 0:
             return
         side = "SELL" if state.direction == "LONG" else "BUY"
         resp = self.gateway.place_order(
             OrderRequest(symbol=state.symbol, side=side, order_type="MARKET", quantity=qty)
         )
-        if resp.status not in ("ERROR", "REJECTED"):
-            state.closed_qty += qty
-            if state.closed_qty >= pos.quantity - 0.0001:
-                setattr(state, done_attr, True)
-            logger.info(f"[Guardian] {label}: {state.symbol} {qty} @ ...")
+        if resp.status in ("ERROR", "REJECTED"):
+            return
+        exit_price = self._fill_price(resp, current_price)
+        state.closed_qty += qty
+        setattr(state, done_attr, True)
+        pos.quantity = round(pos.quantity - qty, 8)
+        if pos.quantity <= 0.0001:
+            # 全部平掉: 移除持仓并记入已实现盈亏 (剩余数量为准)
+            self.portfolio.close_position(state.symbol, exit_price)
+        else:
+            # 部分止盈: 同步已实现盈亏到 tracker, 持仓数量已在 pos.quantity 上反映
+            direction_mult = 1 if state.direction == "LONG" else -1
+            pnl = (exit_price - state.entry_price) * qty * direction_mult
+            self.portfolio.total_equity += pnl
+            self.portfolio.total_realized_pnl += pnl
+            self.portfolio.daily_realized_pnl += pnl
+            if pnl > 0:
+                self.portfolio.consecutive_losses = 0
+            elif pnl < 0:
+                self.portfolio.consecutive_losses += 1
+            if self.portfolio.total_equity > self.portfolio.peak_equity:
+                self.portfolio.peak_equity = self.portfolio.total_equity
+        logger.info(f"[Guardian] {label}: {state.symbol} {qty} @ {exit_price:.2f}")
 
     def _check_tp(self, state: PositionState, current_price: float):
         pnl_pct = ((current_price - state.entry_price) / state.entry_price
@@ -164,9 +198,11 @@ class PositionGuardian:
         if not pos:
             return
         self._exec_tp_tier(state, pos, pnl_pct, self.config.tp1_pct,
-                           "tp1_attempt_ts", "tp1_done", "TP1")
+                           "tp1_attempt_ts", "tp1_done", "TP1",
+                           ratio=self.config.tp1_ratio, current_price=current_price)
         self._exec_tp_tier(state, pos, pnl_pct, self.config.tp2_pct,
-                           "tp2_attempt_ts", "tp2_done", "TP2")
+                           "tp2_attempt_ts", "tp2_done", "TP2",
+                           current_price=current_price)
 
     # ─── 主检查循环 ───
 

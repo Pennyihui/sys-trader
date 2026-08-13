@@ -59,6 +59,39 @@ class TestOrderManager:
         active = self.manager.active_orders
         assert len(active) == 3
 
+    def test_entry_rejected_skips_sl_tp(self):
+        """入场单被拒 → 不再下止损/止盈, 只返回入场单。"""
+        self.gateway.place_order.return_value = OrderResponse(
+            order_id=0, symbol="BTCUSDT", side="BUY", status="REJECTED",
+            executed_qty=0.0, avg_price=0.0, error="insufficient margin",
+        )
+        orders = self.manager.execute_signal("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
+        assert len(orders) == 1
+        assert orders[0].state == OrderState.REJECTED
+        self.gateway.place_algo_order.assert_not_called()
+
+    def test_filled_entry_maps_to_filled_state(self):
+        """入场单即时成交 FILLED → OrderState.FILLED (不再是 PENDING)。"""
+        self.gateway.place_order.return_value = OrderResponse(
+            order_id=42, symbol="BTCUSDT", side="BUY", status="FILLED",
+            executed_qty=0.15, avg_price=62500.0,
+        )
+        order = self.manager.submit_entry("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
+        assert order.state == OrderState.FILLED
+        assert order.filled_qty == 0.15
+        # 已成交单不进入活跃集 (不再等待成交)
+        assert all(o.order_id != 42 for o in self.manager.active_orders)
+
+    def test_partially_filled_maps_to_partially_filled_state(self):
+        """PARTIALLY_FILLED → OrderState.PARTIALLY_FILLED (保留在活跃集)。"""
+        self.gateway.place_order.return_value = OrderResponse(
+            order_id=43, symbol="BTCUSDT", side="BUY", status="PARTIALLY_FILLED",
+            executed_qty=0.05, avg_price=62500.0,
+        )
+        order = self.manager.submit_entry("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
+        assert order.state == OrderState.PARTIALLY_FILLED
+        assert any(o.order_id == 43 for o in self.manager.active_orders)
+
 
 @pytest.mark.unit
 def test_publishes_order_filled_after_submit():

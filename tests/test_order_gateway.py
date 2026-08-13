@@ -53,6 +53,26 @@ class TestOrderGateway:
         assert "testnet" not in gw.base_url
         assert "fapi.binance.com" in gw.base_url
 
+    def test_fmt_qty_avoids_scientific_notation(self):
+        """极小数量不转科学计数法 (Binance 拒绝 "8e-05")。"""
+        gw = OrderGateway(testnet=True)
+        assert gw._fmt_qty(0.00008) == "0.00008"
+        assert gw._fmt_qty(0.15) == "0.15"
+        assert gw._fmt_qty(0.0) == "0"
+        assert "e" not in gw._fmt_qty(1e-05)
+
+    def test_place_order_quantity_formatted_fixed(self):
+        """place_order 参数中的 quantity 为纯十进制 (含极小值)。"""
+        req = OrderRequest(symbol="BTCUSDT", side="BUY", order_type="MARKET", quantity=0.00008)
+        with patch.object(self.gateway, "_request", return_value={
+            "orderId": 1, "symbol": "BTCUSDT", "side": "BUY",
+            "status": "NEW", "executedQty": "0", "avgPrice": "0",
+        }) as mock_request:
+            self.gateway.place_order(req)
+        params = mock_request.call_args[0][2]
+        assert params["quantity"] == "0.00008"
+        assert "e" not in params["quantity"]
+
 
 @pytest.mark.unit
 class TestOrderGatewayRequestRetry:

@@ -61,3 +61,22 @@ class TestScheduler:
             self.results.get(timeout=1)
         except queue.Empty:
             pytest.fail("Task should have completed before shutdown")
+
+    def test_dispatch_surfaces_engine_exception(self, caplog):
+        """任务异常不静默吞掉: done_callback 取回 result 并记录日志。"""
+        import time
+        from scheduler.scheduler import Scheduler
+
+        def bad_engine(symbol, timeframe, ohlcv):
+            raise RuntimeError("engine boom")
+
+        sched = Scheduler(engine_run=bad_engine, max_workers=1)
+        sched.dispatch("BTCUSDT", "4h", [])
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if "engine boom" in caplog.text:
+                sched.shutdown()
+                return
+            time.sleep(0.05)
+        sched.shutdown()
+        pytest.fail("任务异常未被记录")

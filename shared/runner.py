@@ -142,9 +142,15 @@ class SystemRunner:
 
         # 统一装配: 执行层 + 信号链 + 风控链
         mode = ExecutionModeManager(ExecutionMode(self.execution_mode_name.lower()))
+        # PAPER 模式接线 PaperTrader (用实时行情模拟成交), 否则条件单会抛错被吞 → 零下单
+        paper_trader = None
+        if mode.is_paper():
+            from shared.paper_trader import PaperTrader
+            paper_trader = PaperTrader(feed=self.feed)
         self.orders = OrderManager(
             gateway=self.gateway, execution_mode=mode,
             event_bus=self.event_bus, instance=self.instance,
+            paper_trader=paper_trader,
         )
         self.engine = self._build_signal_chain()
         self.risk_chain = self._build_risk_chain()
@@ -156,7 +162,8 @@ class SystemRunner:
         time.sleep(2)
 
         # 启动时对账 (使用缓存的账户数据)
-        reconciler = PositionReconciler(self.gateway, self.portfolio)
+        reconciler = PositionReconciler(self.gateway, self.portfolio,
+                                        on_drift=self._on_reconcile_drift)
         reconciler.reconcile(cached_account=acc)
 
         # 持续对账
@@ -270,7 +277,8 @@ class SystemRunner:
                 signal.entry_price, signal.stop_loss, signal.take_profit,
             )
             # 成功判定以入场单 (列表第 1 个) 的 state 为唯一判据:
-            # OrderManager 将 FILLED/NEW 均映射为 PENDING, 仅 REJECTED/ERROR 为失败
+            # OrderManager 将 NEW → PENDING / FILLED → FILLED / PARTIALLY_FILLED → PARTIALLY_FILLED,
+            # 仅 REJECTED/ERROR 为失败 (入场被拒时 execute_signal 已跳过 SL/TP, 只返回入场单)
             entry = orders[0] if orders else None
             if entry is None or entry.state in (OrderState.REJECTED, OrderState.ERROR):
                 self.stats["orders_failed"] += 1
@@ -354,6 +362,46 @@ class SystemRunner:
                 logger.warning("Order cancel failed %s orderId=%s: %s",
                                symbol, oid, getattr(resp, "error", ""))
         order.state = OrderState.CANCELED
+
+    def _refresh_equity(self):
+        """周期刷新账户权益: 拉取 walletBalance 并 update_equity。
+
+        风控链 (回撤/日亏损/连亏) 依赖 portfolio 的权益基准, 若只在启动时
+        刷新一次则亏损后权益永不更新, 熔断永远不触发。主循环每 60s 调用。
+        """
+        try:
+            acc = self.gateway.get_account()
+            if not isinstance(acc, dict) or acc.get("error"):
+                return
+            assets = acc.get("assets") or []
+            total = sum(float(a.get("walletBalance", 0)) for a in assets) if assets else 0.0
+            if total <= 0:
+                total_wb = acc.get("totalWalletBalance")
+                if total_wb:
+                    total = float(total_wb)
+                else:
+                    return
+            self.portfolio.update_equity(total)
+            logger.debug("Equity refreshed: %.2f USDT", total)
+        except Exception as e:
+            logger.error("Equity refresh failed: %s", e)
+
+    def _on_reconcile_drift(self, report):
+        """对账漂移回调: 交易所持仓消失但本地仍记录 → close_position 同步本地。
+
+        close_position 计入 realized PnL / 连亏 / 日亏损, 使风控链能感知已平仓。
+        """
+        try:
+            for sym in report.details.get("local_only", []):
+                price = self.feed.get_last_price(sym) if self.feed else None
+                if price is None:
+                    logger.warning("RECONCILE %s: 交易所持仓消失但无行情, 跳过本地平仓同步", sym)
+                    continue
+                pnl = self.portfolio.close_position(sym, price)
+                logger.warning("RECONCILE %s: 交易所持仓消失 → 本地平仓 @ %.2f (pnl=%.2f)",
+                               sym, price, pnl)
+        except Exception as e:
+            logger.error("Reconcile drift handler failed: %s", e)
 
     def _check_pending_timeouts(self):
         """PENDING 订单超时检测: 超时自动撤单，避免僵尸单 (每 60s 轮询)。
@@ -556,6 +604,7 @@ class SystemRunner:
         end_time = time.time() + self.hours * 3600 if self.hours > 0 else None
         last_snapshot = time.time()
         last_pending_check = time.time()
+        last_equity_check = time.time()
         try:
             while True:
                 # 模块心跳: 主循环每轮标记 runner 存活
@@ -563,6 +612,10 @@ class SystemRunner:
                 time.sleep(5)
                 self._check_stall()
                 self._check_connections()
+                # 周期刷新账户权益, 保证风控链 (回撤/日亏损/连亏) 基准不过期
+                if time.time() - last_equity_check >= 60:
+                    self._refresh_equity()
+                    last_equity_check = time.time()
                 if time.time() - last_snapshot >= 60:
                     self._snapshot()
                     last_snapshot = time.time()

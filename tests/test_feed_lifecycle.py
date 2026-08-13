@@ -1,4 +1,5 @@
 """测试 MarketDataFeed 冗余连接架构的连接生命周期。"""
+import json
 import pytest
 import threading
 import time
@@ -72,15 +73,18 @@ class TestFeedConnectionLifecycle:
         self.feed._try_switch_primary(0)
         assert self.feed._primary_idx == 2
 
-    def test_on_message_wrapper_filters_non_primary(self):
-        """非主连接的消息应被过滤"""
+    def test_on_message_wrapper_processes_all_connections(self):
+        """所有连接的消息都应处理（备用连接维持共享 buffer），仅主连接触发回调"""
         self.feed._primary_idx = 0
-        messages = []
-        self.feed._on_message = lambda m: messages.append(m)
+        calls = []
+        self.feed._on_message = lambda raw, notify_closed=True: calls.append(
+            (raw, notify_closed)
+        )
         self.feed._on_message_wrapper(0, "data1")
-        assert len(messages) == 1
         self.feed._on_message_wrapper(1, "data2")
-        assert len(messages) == 1
+        assert len(calls) == 2
+        assert ("data1", True) in calls
+        assert ("data2", False) in calls
 
     def test_on_message_wrapper_no_lock_contention(self):
         """并发消息不应导致锁竞争崩溃"""
@@ -127,13 +131,37 @@ class TestFeedFailover:
         self.feed._on_conn_open(0)
         assert state.connected is True
 
-    def test_on_message_wrapper_late_standby_message(self):
-        """切换主连接后，旧主连接的延迟消息应被丢弃"""
+    def test_on_message_wrapper_late_standby_message_no_callback(self):
+        """切换主连接后，旧主连接的延迟消息只更新 buffer，不触发闭合回调"""
         self.feed._primary_idx = 1
-        messages = []
-        self.feed._on_message = lambda m: messages.append(m)
+        calls = []
+        self.feed._on_message = lambda raw, notify_closed=True: calls.append(
+            (raw, notify_closed)
+        )
         self.feed._on_message_wrapper(0, "stale")
-        assert len(messages) == 0
+        assert len(calls) == 1
+        assert calls[0] == ("stale", False)
+
+    def test_closed_callback_fires_once_when_standby_writes_first(self):
+        """备用连接先写入闭合 K 线到共享 buffer，主连接仍应触发且只触发一次回调"""
+        self.feed._primary_idx = 0
+        fired = []
+        self.feed.on_kline_closed = lambda sym, tf, ohlcv: fired.append((sym, tf))
+        msg = {
+            "e": "kline", "s": "BTCUSDT",
+            "k": {"t": 1700000000000, "T": 1700014400000, "o": "62000.0",
+                  "h": "63000.0", "l": "61500.0", "c": "62500.0",
+                  "v": "100.5", "x": True},
+        }
+        # 备用连接 (notify_closed=False) 先写入 buffer
+        self.feed._on_message(json.dumps(msg), notify_closed=False)
+        assert self.feed.buffer.is_closed("BTCUSDT", "4h", 1700000000000) is True
+        # 主连接收到同一根闭合 K 线，应触发一次回调
+        self.feed._on_message(json.dumps(msg), notify_closed=True)
+        assert len(fired) == 1
+        # 重复消息不重复触发
+        self.feed._on_message(json.dumps(msg), notify_closed=True)
+        assert len(fired) == 1
 
     def test_open_close_bounds_check(self):
         """_on_conn_open/close 应做边界检查"""

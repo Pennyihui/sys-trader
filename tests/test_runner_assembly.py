@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from execution.order_manager import ManagedOrder, OrderState
 from monitor.collector import MetricsCollector
+from shared.execution_mode import ExecutionMode
 from shared.runner import STALE_THRESHOLD, SystemRunner
 
 
@@ -67,6 +68,93 @@ def test_initialize_wires_full_assembly(runner):
     assert runner.risk_chain is not None
     assert runner.orders is not None
     assert runner.feed.on_kline_closed is not None
+
+
+@patch("shared.runner.PreflightChecker")
+@patch("shared.runner.PositionReconciler")
+def test_paper_mode_wires_paper_trader(MockReconciler, MockPreflight):
+    """PAPER 模式构造 PaperTrader 并传给 OrderManager (否则零下单)。"""
+    MockPreflight.return_value.run_all.return_value = {
+        "assets": [{"walletBalance": "10000"}],
+    }
+    r = SystemRunner(execution_mode_name="paper")
+    r.gateway = MagicMock()
+    r.feed = MagicMock()
+    with patch.object(r, "_fetch_step_sizes", return_value={}):
+        r.initialize()
+    assert r.orders.paper_trader is not None
+    assert r.orders.execution_mode.mode == ExecutionMode.PAPER
+    assert r.orders.paper_trader.feed is r.feed
+
+
+def test_live_mode_no_paper_trader(runner):
+    """LIVE 模式不接 PaperTrader。"""
+    with patch.object(runner, "_fetch_step_sizes", return_value={}):
+        runner.initialize()
+    assert runner.orders.paper_trader is None
+    assert runner.orders.execution_mode.mode == ExecutionMode.LIVE
+
+
+@patch("shared.runner.OrderGateway")
+@patch("shared.runner.PreflightChecker")
+@patch("shared.runner.PositionReconciler")
+def test_paper_mode_execute_signal_goes_through_paper_trader(MockReconciler, MockPreflight, MockGW):
+    """PAPER 模式下 execute_signal 经 PaperTrader 产生成交, 不触达 gateway。"""
+    MockPreflight.return_value.run_all.return_value = {
+        "assets": [{"walletBalance": "10000"}],
+    }
+    r = SystemRunner(execution_mode_name="paper")
+    r.feed = MagicMock()
+    r.feed.get_last_price.return_value = 64000.0
+    with patch.object(r, "_fetch_step_sizes", return_value={"BTCUSDT": 0.001}):
+        r.initialize()
+    orders = r.orders.execute_signal("BTCUSDT", "LONG", 0.001, 64000.0, 62000.0, 68000.0)
+    # 入场 LIMIT 即时成交 FILLED, 条件单挂起 NEW → PENDING
+    assert orders[0].state == OrderState.FILLED
+    assert all(o.state == OrderState.PENDING for o in orders[1:])
+    MockGW.return_value.place_order.assert_not_called()
+    MockGW.return_value.place_algo_order.assert_not_called()
+
+
+@patch("shared.runner.PreflightChecker")
+@patch("shared.runner.PositionReconciler")
+def test_initialize_wires_reconcile_drift_callback(MockReconciler, MockPreflight):
+    """对账漂移回调接线: 交易所持仓消失 → close_position 同步本地。"""
+    MockPreflight.return_value.run_all.return_value = {
+        "assets": [{"walletBalance": "10000"}],
+    }
+    r = SystemRunner()
+    r.gateway = MagicMock()
+    r.feed = MagicMock()
+    with patch.object(r, "_fetch_step_sizes", return_value={}):
+        r.initialize()
+    call_kwargs = MockReconciler.call_args[1]
+    assert callable(call_kwargs.get("on_drift"))
+
+
+def test_refresh_equity_updates_portfolio(runner):
+    """周期权益刷新: gateway walletBalance → portfolio.update_equity。"""
+    runner.gateway.get_account.return_value = {
+        "assets": [{"walletBalance": "9500"}],
+    }
+    runner._refresh_equity()
+    runner.portfolio.update_equity.assert_called_once_with(9500.0)
+
+
+def test_refresh_equity_ignores_failure(runner):
+    """权益刷新失败 (返回 error) 时静默跳过, 不抛异常。"""
+    runner.gateway.get_account.return_value = {"error": "network down"}
+    runner._refresh_equity()  # 不抛异常
+
+
+def test_reconcile_drift_syncs_closed_position(runner):
+    """对账检测到本地持仓消失 → close_position 以现价同步平仓。"""
+    runner.portfolio.close_position = MagicMock(return_value=-50.0)
+    runner.feed.get_last_price.return_value = 64000.0
+    report = MagicMock()
+    report.details = {"local_only": ["BTCUSDT"], "remote_only": [], "qty_mismatch": []}
+    runner._on_reconcile_drift(report)
+    runner.portfolio.close_position.assert_called_once_with("BTCUSDT", 64000.0)
 
 
 @pytest.mark.unit
