@@ -44,12 +44,18 @@ def load_pool() -> dict:
                 "https://github.com/Au1rxx/free-vpn-subscriptions/raw/main/output/clash.yaml",
                 "https://raw.githubusercontent.com/diplole/proxy-pool/main/clash.yaml",
                 "https://raw.githubusercontent.com/diplole/proxy-pool/main/ikuku-free.yaml",
+                "https://cdn.jsdelivr.net/gh/free18/v2ray@main/c.yaml",
+                "https://v2rayfreeclash.github.io/uploads/2026/08/0-20260802.yaml",
+                "https://topfreeclash.github.io/uploads/2026/07/0-20260730.yaml",
+                "https://raw.githubusercontent.com/sunmiao4458/free-proxy-airport/main/output/clash.yaml",
+                "https://raw.githubusercontent.com/zhuhaiuk/free-nodes/main/clash_config.yaml",
             ],
             "proxies": [],
             "proxy_groups": {
                 "auto-failover": {
-                    "type": "load-balance", "strategy": "round-robin",
-                    "url": "http://www.gstatic.com/generate_204", "interval": 60,
+                    "type": "url-test",
+                    "url": "https://fapi.binance.com/fapi/v1/time",
+                    "interval": 60, "tolerance": 100,
                 }
             },
             "cleanup": {"max_fail_days": 7, "max_fail_count": 10080},

@@ -2,8 +2,9 @@
 
 两阶段:
   阶段1: TCP 连接测速（快，全量节点）→ healthy / latency_ms
-  阶段2: 传输探测（通过 mihomo 按节点测速 YouTube，环形窗口轮换）
-         → transfer_ok=True 的才是"真能传数据"的节点。
+  阶段2: 传输探测（通过 mihomo 按节点测速，两类分开）:
+         - binance_ok（交易关键）每轮全量探测，不受 CAP 限制 → 能到 fapi.binance.com
+         - transfer_ok（YouTube，浏览器需求）环形窗口轮换 → 真能传数据的节点
 
 实测教训（2026-08-07）:
   - 直接对节点发 HTTP CONNECT 是错的——vless/trojan/hysteria2 不讲 HTTP 协议，
@@ -36,7 +37,9 @@ MAX_WORKERS = 50
 TRANSFER_URL = "https://www.youtube.com/favicon.ico"
 BINANCE_URL = "https://fapi.binance.com/fapi/v1/time"
 TRANSFER_TIMEOUT_MS = 8000     # 8s 内完成才算真健康
-TRANSFER_PROBE_CAP = 800       # 每轮最多探测数（环形轮换，多轮覆盖全部）
+# YouTube 传输探测每轮最多探测数（环形窗口轮换，多轮覆盖全部健康节点）。
+# 调大到 ≥ 健康节点总数后实际每轮全覆盖；binance 探测不受此上限约束（见 health_check）。
+TRANSFER_PROBE_CAP = 3000
 
 _probe_round = 0
 
@@ -153,7 +156,10 @@ def health_check(pool: Dict, timeout: float = 3.0) -> Dict:
                 entry["latency_ms"] = None
                 unhealthy_count += 1
 
-    # 阶段2: 传输探测（经 mihomo 按节点测速，环形窗口，多轮覆盖全部健康节点）
+    # 阶段2: 传输探测（经 mihomo 按节点测速，分两类，重要性不同）:
+    #   1. binance_ok（交易关键）→ 每轮全量探测，不受 CAP 限制，一轮覆盖全部健康节点
+    #   2. transfer_ok（YouTube，浏览器需求）→ 环形窗口轮换（TRANSFER_PROBE_CAP），
+    #      多轮覆盖，控制探测对 mihomo 的压力
     # 只测当前配置里存在的节点——不在配置里的节点 mihomo 会回 404，误标 False
     global _probe_round
     _probe_round += 1
@@ -161,23 +167,27 @@ def health_check(pool: Dict, timeout: float = 3.0) -> Dict:
     config_names = _load_config_proxy_names()
     n = len(healthy_entries)
     if n > 0:
+        bn_batch = [e for e in healthy_entries if _prefixed_name(e) in config_names]
         start = (_probe_round * TRANSFER_PROBE_CAP) % n
-        batch = (healthy_entries + healthy_entries)[start:start + TRANSFER_PROBE_CAP]
-        batch = [e for e in batch if _prefixed_name(e) in config_names]
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        yt_batch = [
+            e for e in (healthy_entries + healthy_entries)[start:start + TRANSFER_PROBE_CAP]
+            if _prefixed_name(e) in config_names
+        ]
+        with ThreadPoolExecutor(max_workers=40) as executor:
             futures = {}
-            for e in batch:
-                name = _prefixed_name(e)
-                futures[executor.submit(_probe_url, name, TRANSFER_URL)] = (e, "transfer_ok")
-                futures[executor.submit(_probe_url, name, BINANCE_URL)] = (e, "binance_ok")
+            for e in yt_batch:
+                futures[executor.submit(_probe_url, _prefixed_name(e), TRANSFER_URL)] = (e, "transfer_ok")
+            for e in bn_batch:
+                futures[executor.submit(_probe_url, _prefixed_name(e), BINANCE_URL)] = (e, "binance_ok")
             for f in as_completed(futures):
                 entry, key = futures[f]
                 entry[key] = f.result()
         yt_ok = sum(1 for e in healthy_entries if e.get("transfer_ok"))
         bn_ok = sum(1 for e in healthy_entries if e.get("binance_ok"))
         logger.info(
-            "传输探测(经mihomo): YouTube %d 真健康, binance %d 真健康 (%d 健康节点中, 探测 %d)",
-            yt_ok, bn_ok, n, len(batch),
+            "传输探测(经mihomo): YouTube %d 真健康, binance %d 真健康 "
+            "(共 %d 健康节点, binance 探测 %d, YouTube 探测 %d)",
+            yt_ok, bn_ok, n, len(bn_batch), len(yt_batch),
         )
 
     pool["last_updated"] = now

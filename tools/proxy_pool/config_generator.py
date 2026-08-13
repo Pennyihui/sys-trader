@@ -3,8 +3,9 @@
 服务完全接管 mihomo 核心后，本模块生成完整配置（不是片段）：
   - base 段: 端口(mixed 7897 / socks 7898 / http 7899)、mode rule、external-controller
   - 两档代理组:
-      1) auto 组（url-test，全部健康节点，低要求）→ 浏览器/日常外网流量
-      2) 8 个 auto-failover-* 组（load-balance，按订阅源分组）→ 交易系统
+      1) auto 组（load-balance round-robin，transfer_ok 节点）→ 浏览器/日常外网流量
+      2) 8 个 auto-failover-* 组（url-test，按订阅源分组，币安健康检查）→ 交易系统
+  - binance-failover 合并组（url-test，币安健康检查）→ 币安 REST 规则走它
   - 规则: binance 域名 → 严格组；geolocation-!cn → auto；cn → DIRECT
   - 8 个监听端口（7900-7907，绑定严格组，交易系统专用）
 """
@@ -46,7 +47,16 @@ BINANCE_DOMAINS = [
 # binance 规则指向合并组（所有源的 binance 真健康节点）。
 # 实测教训（2026-08-08）: 单源组可能只有 3 个真健康节点（au1rxx），
 # 轮换脆弱导致偶发失败；diplole 有 240 个真健康节点却闲置。
+# 2026-08-14 改造: url-test + 币安健康检查——延迟最低节点被锁定，慢节点自动出局，
+# 消除 round-robin 撞慢节点导致的延迟尖峰/时间戳超窗（-1021）。
 FALLBACK_GROUP = "binance-failover"
+
+# binance 健康检查 URL：测"节点→币安实盘"真实链路延迟（不是 gstatic 的 Google 延迟）。
+# 交易 REST 是短连接，load-balance round-robin 每请求换节点=每次都可能轮到 421ms 慢节点；
+# url-test 持续测量并锁定延迟最低节点，tolerance 100ms 内不切换避免抖动。
+BINANCE_HEALTH_URL = "https://fapi.binance.com/fapi/v1/time"
+BINANCE_HEALTH_INTERVAL = 60
+BINANCE_HEALTH_TOLERANCE = 100
 
 # auto 组（浏览器日常流量）: load-balance round-robin，只收"真能传数据"的节点
 # （health_checker 的 transfer_ok 标记，见 health_checker.py）。
@@ -83,6 +93,12 @@ GROUP_NAMES = [
     "auto-failover-topfreeclash",
 ]
 
+# build_clash_proxies 明确支持的节点协议，mihomo 配置里只放这些。
+# 未知类型（ssr/anytls/…）会因缺必填字段让 mihomo 整份配置加载失败——
+# 宁可跳过也不要让一个坏节点拖垮全局（新增订阅源可能带来这类节点）。
+# http/socks5 不带认证字段即可（mihomo 默认无认证），其余字段在下方分支里显式装配。
+SUPPORTED_PROXY_TYPES = {"ss", "hysteria2", "trojan", "vless", "vmess", "http", "socks5"}
+
 
 def _group_proxies_by_source(pool: Dict) -> Dict[str, List[dict]]:
     """按 source 字段分组健康节点。"""
@@ -107,6 +123,10 @@ def build_clash_proxies(pool: Dict) -> List[dict]:
         name = entry.get("name", "")
         ptype = entry.get("type", "")
         if not name or not ptype:
+            continue
+        # 白名单过滤：未明确支持的协议缺必填字段会让 mihomo 整份配置加载失败
+        if ptype not in SUPPORTED_PROXY_TYPES:
+            logger.debug("跳过不支持的节点类型 %s (%s)", ptype, name)
             continue
         source = entry.get("source", "other")
         prefixed = f"{source}-{name}"
@@ -198,11 +218,11 @@ def build_groups_and_listeners(pool: Dict) -> tuple[List[dict], List[dict]]:
             ]
         proxy_groups.append({
             "name": group_name,
-            "type": "load-balance",
-            "strategy": "round-robin",
+            "type": "url-test",
             "proxies": prefixed_names,
-            "url": "http://www.gstatic.com/generate_204",
-            "interval": 60,
+            "url": BINANCE_HEALTH_URL,
+            "interval": BINANCE_HEALTH_INTERVAL,
+            "tolerance": BINANCE_HEALTH_TOLERANCE,
         })
         listeners.append({
             "name": f"in-{source}-{port}",
@@ -274,6 +294,8 @@ def generate_full_config(pool: Dict) -> Dict:
     }
 
     # binance 合并组：所有源的 binance 真健康节点（binance 规则走它，抗单源波动）
+    # url-test 持续测量每个节点到 fapi.binance.com 的延迟并锁定最低者，
+    # 慢节点自动出局；tolerance 100ms 内不切换，避免延迟抖动引发来回跳。
     bn_entries = [
         e for e in pool.get("proxies", [])
         if e.get("healthy") and e.get("binance_ok")
@@ -288,13 +310,13 @@ def generate_full_config(pool: Dict) -> Dict:
         logger.warning("无任何健康节点，binance-failover 暂时用 DIRECT 兜底")
     binance_group = {
         "name": "binance-failover",
-        "type": "load-balance",
-        "strategy": "round-robin",
-        "url": "http://www.gstatic.com/generate_204",
-        "interval": 60,
+        "type": "url-test",
+        "url": BINANCE_HEALTH_URL,
+        "interval": BINANCE_HEALTH_INTERVAL,
+        "tolerance": BINANCE_HEALTH_TOLERANCE,
         "proxies": bn_names,
     }
-    logger.info("binance-failover 组: %d 个真健康节点", len(bn_entries))
+    logger.info("binance-failover 组: %d 个真健康节点 (url-test)", len(bn_entries))
 
     # iyf-fixed 组：fallback，健康检查 URL 直接指向 pipecdn（视频 CDN）。
     # 关键设计（2026-08-08 实测）:

@@ -225,9 +225,14 @@ def _source_key(url: str) -> str:
     例: github.com/Au1rxx/... -> au1rxx
         raw.githubusercontent.com/diplole/... -> diplole
         cdn.jsdelivr.net/gh/free18/... -> free18
+        raw.githubusercontent.com/sunmiao4458/... -> sunmiao4458
+        raw.githubusercontent.com/zhuhaiuk/... -> zhuhaiuk
     """
     import re
-    m = re.search(r"(?:Au1rxx|diplole|free18|v2rayfreeclash|topfreeclash|ikuku|free-vpn)", url, re.I)
+    m = re.search(
+        r"(?:Au1rxx|diplole|free18|v2rayfreeclash|topfreeclash|ikuku|free-vpn|sunmiao4458|zhuhaiuk)",
+        url, re.I,
+    )
     if m:
         return m.group(0).lower()
     # 兜底: 用主机名
