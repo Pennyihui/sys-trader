@@ -116,19 +116,28 @@ class OrderGateway:
 
         -1021（timestamp outside recvWindow）的根治：代理延迟尖峰导致
         本机时间戳超窗时，重试只能刷新本机时间，偏移依旧。校准后签名
-        时间戳叠加偏移，超窗概率大幅下降。失败时偏移退化 0（现状）。
+        时间戳叠加偏移，超窗概率大幅下降。
+
+        失败时保留上一次成功的偏移量（而非归零）——代理抖动导致"问时间"
+        超时是常态，归零等于丢弃之前的校准结果，反而在抖动期间失去保护。
+        timeout 放宽到 15s，容忍代理延迟尖峰。
         """
         try:
             now = int(time.time() * 1000)
             resp = requests.get(
-                f"{self.base_url}/fapi/v1/time", timeout=5, proxies=self.proxies
+                f"{self.base_url}/fapi/v1/time", timeout=15, proxies=self.proxies
             )
             server = resp.json().get("serverTime")
             if server:
                 self._time_offset = int(server) - now
+                logger.info("Server time synced (offset=%dms)", self._time_offset)
+                return
+            logger.warning("Server time sync: empty serverTime in response")
         except Exception as e:
-            logger.warning("Server time sync failed (fallback offset=0): %s", e)
-            self._time_offset = 0
+            logger.warning(
+                "Server time sync failed (keep last offset=%dms): %s",
+                self._time_offset, e,
+            )
 
     @staticmethod
     def _is_business_retryable(resp, body: dict) -> bool:
