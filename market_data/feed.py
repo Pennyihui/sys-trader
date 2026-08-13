@@ -349,8 +349,9 @@ class MarketDataFeed:
                     http_proxy_host=self.proxy_host,
                     http_proxy_port=conn_port,
                     proxy_type="http",
-                    # 代理延迟可达 6-10s+，ping_timeout 需能容忍波动，避免误判假死
-                    ping_interval=20,
+                    # 代理延迟可达 6-10s+，ping_timeout 需能容忍波动，避免误判假死。
+                    # 约束: ping_interval 必须 > ping_timeout（websocket-client 强制）。
+                    ping_interval=60,
                     ping_timeout=30,
                 )
             except Exception as e:
