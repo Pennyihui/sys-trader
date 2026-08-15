@@ -1,14 +1,24 @@
 """健康检查器 - 并发测速所有节点，标记可用/不可用。
 
 两阶段:
-  阶段1: 经 mihomo 测通用连通性（gstatic 204 粗筛，全量节点）→ healthy / latency_ms
+  阶段1: 直连 TCP 粗筛节点服务器连通性（socket.create_connection，全量节点）
+         → healthy / latency_ms。不依赖 mihomo：节点服务器 TCP 可达即算活。
   阶段2: 传输探测（通过 mihomo 按节点测速，两类分开）:
          - binance_ok（交易关键）每轮全量探测，不受 CAP 限制 → 能到 fapi.binance.com
          - transfer_ok（YouTube，浏览器需求）环形窗口轮换 → 真能传数据的节点
+  阶段2 只测阶段1 判定 TCP 可达的节点（healthy=true）。
+
+分工与死循环:
+  阶段1 只回答"节点服务器通不通"（直连 TCP，与 mihomo 组状态无关）；阶段2 才回答
+  "能否真正访问目标"（经 mihomo delay API）。二者互补：mihomo 代理组若因坏节点/
+  退化配置而无法转发，delay API 会对所有节点返回失败——阶段1 若依赖它，会把全量
+  误判 unhealthy、healthy=0、配置退化为 DIRECT、mihomo 更无法转发、下一轮继续全
+  失败（死循环）。直连 TCP 不受组状态影响，即使组坏了也能筛出活节点 → config 生成
+  好配置 → mihomo 恢复 → 阶段2 再精筛，从而打破死循环。
 
 实测教训（2026-08-07）:
   - 直接对节点发 HTTP CONNECT 是错的——vless/trojan/hysteria2 不讲 HTTP 协议，
-    只有 mihomo 会翻译。所以探测必须通过 mihomo 的
+    只有 mihomo 会翻译。所以阶段2 探测必须通过 mihomo 的
     GET /proxies/{name}/delay?url=... API（测的是真实路径）。
   - 目标用 YouTube：用户真实需求是能看 YouTube。
 """
@@ -16,6 +26,7 @@
 import logging
 import json
 import os
+import socket
 import time
 import urllib.request
 import urllib.error
@@ -39,14 +50,6 @@ TRANSFER_TIMEOUT_MS = 8000     # 8s 内完成才算真健康
 # YouTube 传输探测每轮最多探测数（环形窗口轮换，多轮覆盖全部健康节点）。
 # 调大到 ≥ 健康节点总数后实际每轮全覆盖；binance 探测不受此上限约束（见 health_check）。
 TRANSFER_PROBE_CAP = 3000
-
-# 阶段1 连通性测速参数——经 mihomo 的 /proxies/{name}/delay API 测真实路径:
-#   目标选 gstatic 204 探针（轻量、稳定，config 之前用的就是这个）做粗筛：
-#   阶段1 只回答"节点通不通"，阶段2 才精筛"能否到币安/YouTube"，两阶段目标不冲突。
-#   绝不能用直连 socket：免费机场节点在境外，国内网络直连必超时（实测前 500 节点
-#   并发仅 164 个能直连），会把全量节点误杀成 unhealthy、healthy=0、配置退化。
-STAGE1_URL = "https://www.gstatic.com/generate_204"
-STAGE1_TIMEOUT_MS = 5000       # 5s 内完成才算通
 
 _probe_round = 0
 
@@ -78,13 +81,13 @@ def _mihomo_delay(prefixed_name: str, target: str, timeout_ms: int) -> tuple:
 
 
 def _check_one(entry: dict, timeout: float) -> tuple:
-    """阶段1: 经 mihomo 测通用连通性，返回 (name, is_healthy, latency_ms)。
+    """阶段1: 直连 TCP 粗筛节点服务器连通性，返回 (name, is_healthy, latency_ms)。
 
-    必须走 mihomo delay API 而非直连 socket——vless/trojan/hysteria2 不讲 HTTP，
-    只有 mihomo 会翻译，直连境外节点在国内网络必超时。节点名用 _prefixed_name(entry)
-    （带 source 前缀，与 mihomo 配置里的名字一致）；不在配置里的节点 mihomo 回 404，
-    delay 为 null，按不健康处理。
-    timeout 参数保留以维持签名不变，实际超时由 STAGE1_TIMEOUT_MS 控制。
+    用 socket.create_connection 直连 entry 的 server:port，判断"节点服务器本身
+    是否活着"。不依赖 mihomo 当前组状态——即使代理组因坏节点/退化配置无法转发、
+    delay API 对所有节点全失败，阶段1 仍能筛出活的节点服务器，config 才有好配置
+    可生成、mihomo 才能恢复转发，从而打破死循环（阶段2 再经 mihomo 精筛真实路径）。
+    超时即不可达：3s 对 TCP 连通性粗筛足够（可达节点大多 200-400ms 内握手成功）。
     """
     server = entry.get("server", "")
     port = entry.get("port", 0)
@@ -93,10 +96,16 @@ def _check_one(entry: dict, timeout: float) -> tuple:
     if not server or not port:
         return name, False, None
 
-    ok, latency_ms = _mihomo_delay(_prefixed_name(entry), STAGE1_URL, STAGE1_TIMEOUT_MS)
-    if ok:
+    start = time.time()
+    try:
+        sock = socket.create_connection((server, port), timeout=timeout)
+        latency_ms = (time.time() - start) * 1000
+        sock.close()
         return name, True, latency_ms
-    return name, False, None
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return name, False, None
+    except Exception:
+        return name, False, None
 
 
 def _prefixed_name(entry: dict) -> str:
