@@ -41,11 +41,13 @@ MAX_WORKERS = 50
 
 # 阶段2 传输探测参数——通过 mihomo 按节点测速两个目标:
 #   1. YouTube favicon（浏览器需求，transfer_ok）
-#   2. fapi.binance.com（交易需求，binance_ok——能到实盘接口的节点必能到模拟盘）
+#   2. testnet.binancefuture.com（交易需求，binance_ok——系统当前跑 testnet，
+#      健康目标必须与交易 endpoint 一致，否则会选中"实盘通但 testnet 不通"的节点，
+#      实测 2026-08-15 已发生导致 REST 504/SSL EOF）
 # 用 favicon/轻接口而不是大文件：免费节点对新建连接限速严重，大文件会误杀
 # "能到但慢"的节点。带宽由 mihomo 的 LB 健康检查（AUTO_URL）持续管理。
 TRANSFER_URL = "https://www.youtube.com/favicon.ico"
-BINANCE_URL = "https://fapi.binance.com/fapi/v1/time"
+BINANCE_URL = "https://testnet.binancefuture.com/fapi/v1/time"
 TRANSFER_TIMEOUT_MS = 8000     # 8s 内完成才算真健康
 # YouTube 传输探测每轮最多探测数（环形窗口轮换，多轮覆盖全部健康节点）。
 # 调大到 ≥ 健康节点总数后实际每轮全覆盖；binance 探测不受此上限约束（见 health_check）。

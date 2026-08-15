@@ -54,7 +54,7 @@ def load_pool() -> dict:
             "proxy_groups": {
                 "auto-failover": {
                     "type": "url-test",
-                    "url": "https://fapi.binance.com/fapi/v1/time",
+                    "url": "https://testnet.binancefuture.com/fapi/v1/time",
                     "interval": 60, "tolerance": 100,
                 }
             },

@@ -51,10 +51,13 @@ BINANCE_DOMAINS = [
 # 消除 round-robin 撞慢节点导致的延迟尖峰/时间戳超窗（-1021）。
 FALLBACK_GROUP = "binance-failover"
 
-# binance 健康检查 URL：测"节点→币安实盘"真实链路延迟（不是 gstatic 的 Google 延迟）。
+# binance 健康检查 URL：测"节点→币安"真实链路延迟（不是 gstatic 的 Google 延迟）。
 # 交易 REST 是短连接，load-balance round-robin 每请求换节点=每次都可能轮到 421ms 慢节点；
 # url-test 持续测量并锁定延迟最低节点，tolerance 100ms 内不切换避免抖动。
-BINANCE_HEALTH_URL = "https://fapi.binance.com/fapi/v1/time"
+# 注意：健康检查目标必须与交易系统的实际 endpoint 一致——系统跑 testnet 时健康检查
+# 必须测 testnet.binancefuture.com（否则会选中"实盘通但 testnet 不通"的节点，
+# 导致 REST 504/SSL EOF，实测 2026-08-15 已发生）。
+BINANCE_HEALTH_URL = "https://testnet.binancefuture.com/fapi/v1/time"
 BINANCE_HEALTH_INTERVAL = 60
 BINANCE_HEALTH_TOLERANCE = 100
 
