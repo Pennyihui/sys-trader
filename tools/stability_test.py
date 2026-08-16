@@ -19,7 +19,8 @@ from shared.runner import SystemRunner
 def main():
     load_env()
     parser = argparse.ArgumentParser(description="稳定性测试 (testnet下单)")
-    parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument("--hours", type=float, default=24,
+                        help="运行时长(小时, 支持小数如 0.17=10分钟, OPS-002)")
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT")
     parser.add_argument("--strategy", default="scalping_15m")
     args = parser.parse_args()

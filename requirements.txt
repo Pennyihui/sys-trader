@@ -1,7 +1,22 @@
+# Sys_trader 核心依赖 (2026-08-16 审计补全)
+# 原文件缺少 pandas/pydantic/websocket-client 等, CI 与 Docker 构建会因 import 失败。
+
+# ── 交易核心 ──
+requests>=2.31.0
+python-dotenv>=1.0.0
+pydantic>=2.0            # config/settings.py 配置校验
+pandas>=2.0              # 信号引擎/runner 指标计算
+websocket-client>=1.6    # market_data/feed.py 同步 WebSocket 客户端
+redis>=5.0               # EventBus / StateStore
+pyyaml>=6.0
+
+# ── Dashboard ──
 fastapi>=0.115.0
 uvicorn>=0.30.0
-websockets>=12.0
-redis>=5.0
-requests>=2.31.0
-pyyaml>=6.0
-python-dotenv>=1.0.0
+
+# ── 运维工具 (tools/) ──
+psutil>=5.9              # soak_watchdog / replay_runner RSS 监控
+
+# ── 测试 ──
+pytest>=8.0
+httpx>=0.27            # fastapi.testclient 依赖 (tests/test_ops_dashboard.py 等)

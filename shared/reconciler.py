@@ -35,33 +35,93 @@ class PositionReconciler:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-    def _fetch_remote(self, cached_account: Optional[Dict] = None) -> Dict[str, float]:
+    def _fetch_account(self, cached_account: Optional[Dict] = None) -> Optional[Dict]:
+        """获取账户快照; 失败或响应无效返回 None (调用方必须跳过本轮对账)。
+
+        2026-08-16 修复: 旧实现失败时返回 {}, 调用方把空 positions 当成
+        "交易所持仓全部消失" → local_only 假漂移 → 每 5 分钟假平仓+重导入
+        (代理抖动时反复发生, 已实现盈亏/连亏统计被污染)。
+        """
         try:
             acc = cached_account or self.gateway.get_account()
-            positions = acc.get("positions", [])
-            return {
-                p["symbol"]: float(p.get("positionAmt", 0))
-                for p in positions if abs(float(p.get("positionAmt", 0))) > 0.0001
-            }
         except Exception as e:
-            logger.error("Reconciler: fetch failed: %s", e)
-            return {}
+            logger.error("Reconciler: account fetch failed: %s", e)
+            return None
+        if not isinstance(acc, dict) or acc.get("error") or "positions" not in acc:
+            logger.error("Reconciler: account response invalid, skip cycle: %.120s",
+                         str(acc))
+            return None
+        return acc
+
+    def _fetch_remote(self, cached_account: Optional[Dict] = None) -> Optional[Dict[str, dict]]:
+        acc = self._fetch_account(cached_account)
+        if acc is None:
+            return None
+        result = {}
+        for p in acc.get("positions", []):
+            amt = float(p.get("positionAmt", 0))
+            if abs(amt) > 0.0001:
+                result[p["symbol"]] = {
+                    "qty": amt,  # 带符号: LONG>0 / SHORT<0
+                    "entry": float(p.get("entryPrice", 0) or 0),
+                }
+        return result
 
     def reconcile(self, cached_account: Optional[Dict] = None) -> ReconcileReport:
         remote = self._fetch_remote(cached_account)
+        if remote is None:
+            # 远端状态不可确认: 跳过本轮, 不产生任何漂移结论
+            report = ReconcileReport(
+                drift=False,
+                details={"remote_only": [], "local_only": [], "qty_mismatch": []},
+                timestamp=time.time(),
+            )
+            logger.warning("Reconciler: 账户不可达, 跳过本轮对账 (保留本地状态)")
+            return report
         # 快照: feed 线程可能在迭代期间写 positions (open_position), 避免并发改 dict
-        local = {s: p.quantity for s, p in list(self.portfolio.positions.items())}
+        local = self.portfolio.positions_snapshot() \
+            if hasattr(self.portfolio, "positions_snapshot") \
+            else {s: p for s, p in list(self.portfolio.positions.items())}
         diff = {"remote_only": [], "local_only": [], "qty_mismatch": []}
-        for sym, qty in remote.items():
+        for sym, rp in remote.items():
+            r_qty = float(rp["qty"])
             if sym in local:
-                if abs(qty - local[sym]) > 0.0001:
-                    diff["qty_mismatch"].append({"symbol": sym, "local": local[sym], "remote": qty})
+                lp = local[sym]
+                r_dir = "LONG" if r_qty > 0 else "SHORT"
+                # 2026-08-16 审计: 旧实现 abs(qty - local) 对做空恒误报
+                # (远端 positionAmt 为负, 本地 qty 恒正)。
+                # 先比方向再比数量绝对值。
+                if r_dir != lp.direction or abs(abs(r_qty) - lp.quantity) > 0.0001:
+                    diff["qty_mismatch"].append({
+                        "symbol": sym,
+                        "local": lp.quantity,
+                        "local_direction": lp.direction,
+                        "remote": abs(r_qty),
+                        "remote_direction": r_dir,
+                    })
             else:
-                diff["remote_only"].append(sym)
+                diff["remote_only"].append(
+                    {"symbol": sym, "qty": r_qty, "entry": rp["entry"]}
+                )
         for sym in local:
             if sym not in remote:
                 diff["local_only"].append(sym)
-        drift = bool(diff["remote_only"] or diff["local_only"] or diff["qty_mismatch"])
+        # 余额层对账 (P1-2): 交易所权益 (含未实现) vs 本地权益,
+        # > 2 USDT 且 > 2% 判定漂移 (本地每 60s 才同步一次, 阈值留噪声余量)
+        acc = cached_account if cached_account is not None else self._fetch_account()
+        if isinstance(acc, dict) and acc.get("totalWalletBalance"):
+            remote_equity = float(acc["totalWalletBalance"])
+            local_equity = self.portfolio.total_equity
+            if local_equity > 0:
+                gap = abs(remote_equity - local_equity)
+                if gap > max(2.0, local_equity * 0.02):
+                    diff["balance_drift"] = {
+                        "remote": round(remote_equity, 2),
+                        "local": round(local_equity, 2),
+                        "gap": round(gap, 2),
+                    }
+        drift = bool(diff["remote_only"] or diff["local_only"]
+                     or diff["qty_mismatch"] or diff.get("balance_drift"))
         report = ReconcileReport(drift=drift, details=diff, timestamp=time.time())
         if drift:
             logger.warning("Position drift: %s", diff)

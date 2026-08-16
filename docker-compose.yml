@@ -7,6 +7,9 @@ services:
       - "6379:6379"
     restart: unless-stopped
 
+  # 注: backend 容器只运行 Dashboard API (uvicorn dashboard.server:app)。
+  # 交易主进程 shared.runner 在本机原生运行 (需访问宿主机 Clash 代理与 Memurai)，
+  # 容器化部署见 docs/superpowers/specs/2026-07-27-operations-system.md。
   backend:
     build: .
     ports:

@@ -74,4 +74,5 @@ class TestDingTalkNotifier:
             assert ok is True
             payload = mock_post.call_args[0][0]
             assert payload["msgtype"] == "markdown"
-            assert payload["markdown"]["title"] == "标题"
+            # 关键词安全模式下 markdown title 同样带 [SysTrader] 前缀 (2026-08-16 审计)
+            assert payload["markdown"]["title"] == "[SysTrader] 标题"

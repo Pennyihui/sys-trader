@@ -38,6 +38,24 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: 运行时间较长的测试")
 
 
+# ─── 全局 Fixture ───
+
+@pytest.fixture(autouse=True)
+def _disable_external_services(monkeypatch):
+    """测试默认关闭外部服务 (2026-08-16 P0):
+    - USER_DATA_STREAM: runner.initialize 会启动真实 WS 线程
+    - FUNDING_MONITOR: 会真实请求 premiumIndex 接口
+    - DB_PATH/INTENTS_DB_PATH: 防止测试写脏真实 data/*.db
+    需要测对应功能的用例自行 mock/覆盖。"""
+    monkeypatch.setenv("USER_DATA_STREAM", "0")
+    monkeypatch.setenv("FUNDING_MONITOR", "0")
+    monkeypatch.setenv("DB_PATH", ":memory:")
+    monkeypatch.setenv("INTENTS_DB_PATH", ":memory:")
+    monkeypatch.setenv("OPS_HISTORY_DB", ":memory:")  # 防测试写脏 data/ops_history.db
+    # 防 import dashboard.server 触发真实 Redis/WS 装配 (2026-08-16 审计)
+    monkeypatch.setenv("DASHBOARD_AUTOSTART", "0")
+
+
 # ─── 基础 Fixture ───
 
 @pytest.fixture

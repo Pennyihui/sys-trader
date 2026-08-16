@@ -30,17 +30,34 @@ class KlineBuffer:
     def _key(self, symbol: str, timeframe: str) -> str:
         return f"{symbol}:{timeframe}"
 
-    def add(self, kline: Kline):
+    def add(self, kline: Kline) -> bool:
+        """写入 K 线。返回 True=已写入，False=乱序丢弃。
+
+        乱序保护（2026-08-16 审计修复）：备用连接重连窗口可能补发
+        open_time 早于当前最新 K 线的过期闭合 candle，直接 append 会破坏
+        序列（`_latest` 指向旧 candle → 指标/信号基于乱序数据）。
+        过期 K 线一律丢弃，宁可少一根也不让序列乱序。
+        """
         key = self._key(kline.symbol, kline.timeframe)
         with self._lock:
             existing = self._latest.get(key)
             if existing and existing.open_time == kline.open_time:
                 self._data[key][-1] = kline
+            elif existing and kline.open_time < existing.open_time:
+                # 乱序/过期 K 线: 先按 open_time 找同窗行（倒序扫描，列表 ≤ max_size）
+                rows = self._data[key]
+                for i in range(len(rows) - 1, -1, -1):
+                    if rows[i].open_time == kline.open_time:
+                        rows[i] = kline
+                        return True
+                # 无同窗行 → 纯过期数据，丢弃
+                return False
             else:
                 self._data[key].append(kline)
                 if len(self._data[key]) > self.max_size:
                     self._data[key] = self._data[key][-self.max_size:]
             self._latest[key] = kline
+        return True
 
     def get_klines(self, symbol: str, timeframe: str, limit: int = 100) -> List[Kline]:
         with self._lock:
@@ -61,3 +78,8 @@ class KlineBuffer:
     def get_latest(self, symbol: str, timeframe: str) -> Optional[Kline]:
         with self._lock:
             return self._latest.get(self._key(symbol, timeframe))
+
+    def all_entries(self) -> dict:
+        """全部 (key, K线列表) 快照 — 主备切换补发漏通知用 (2026-08-16)。"""
+        with self._lock:
+            return {k: list(v) for k, v in self._data.items()}

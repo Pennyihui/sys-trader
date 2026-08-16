@@ -5,8 +5,13 @@ export interface PositionData {
   direction: string;
   quantity: number;
   entry_price: number;
+  break_even?: number;
   mark_price: number;
   unrealized_pnl: number;
+  leverage?: number;
+  liquidation_price?: number | null;
+  liq_distance_pct?: number | null;
+  adl_quantile?: number | null;
 }
 
 // signal.generated / signal.approved / signal.rejected 事件的统一形态
@@ -20,7 +25,7 @@ export interface SignalItem {
   take_profit?: number;
   signal_id?: string;
   strategy?: string;
-  timestamp?: number;
+  ts?: string;
   // 风控链决策帧: 'signal.approved' | 'signal.rejected'
   decision?: string;
   reason?: string;
@@ -38,6 +43,15 @@ export interface OrderItem {
   price?: number;
   order_id?: string | number;
   error?: string | null;
+  ts?: string;
+}
+
+export interface Ticker {
+  symbol: string;
+  last: number;
+  change_pct: number;
+  high: number;
+  low: number;
 }
 
 export interface DashboardData {
@@ -48,6 +62,10 @@ export interface DashboardData {
   position_count: number;
   positions: PositionData[];
   prices: Record<string, { last: number | null; mark: number | null }>;
+  assets: { asset: string; walletBalance: number }[];
+  available_balance: number;
+  tickers: Ticker[];
+  tickers_updated_at: number;
   signals: SignalItem[];
   orders: OrderItem[];
   heartbeats: Record<string, number>;
@@ -59,32 +77,64 @@ export interface CommandAck {
   error?: string;
 }
 
+function storedToken(): string {
+  try { return sessionStorage.getItem('dshtoken') || ''; } catch { return ''; }
+}
+
 export function useWebSocket() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [connected, setConnected] = useState(false);
   const [lastAck, setLastAck] = useState<CommandAck | null>(null);
+  const [needAuth, setNeedAuth] = useState(false);
   const ws = useRef<WebSocket | null>(null);
+  const retry = useRef(0);
 
   useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws`;
-    ws.current = new WebSocket(url);
-    ws.current.onopen = () => setConnected(true);
-    ws.current.onclose = () => setConnected(false);
-    ws.current.onmessage = (e) => {
-      try {
-        const frame = JSON.parse(e.data);
-        // command_ack 帧 (kill switch 反馈) 不进数据状态, 单独存 lastAck
-        if (frame && frame.type === 'command_ack') {
-          setLastAck({ command: frame.command, ok: !!frame.ok, error: frame.error });
-          return;
-        }
-        setData(frame);
-      } catch {}
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const token = storedToken();
+      const url = `${proto}//${location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      const socket = new WebSocket(url);
+      ws.current = socket;
+      socket.onopen = () => { retry.current = 0; setConnected(true); };
+      socket.onclose = (e) => {
+        setConnected(false);
+        if (closed) return;
+        if (e.code === 4401) { setNeedAuth(true); return; }  // 等用户输入 token
+        // 自动重连: 指数退避 1s→2s→4s→…→30s (2026-08-16 审计: 原实现断线即死)
+        const delay = Math.min(30_000, 1000 * 2 ** retry.current);
+        retry.current += 1;
+        setTimeout(connect, delay);
+      };
+      socket.onmessage = (e) => {
+        try {
+          const frame = JSON.parse(e.data);
+          if (frame && frame.type === 'command_ack') {
+            setLastAck({ command: frame.command, ok: !!frame.ok, error: frame.error });
+            return;
+          }
+          setData(frame);
+        } catch { /* 非 JSON 帧忽略 */ }
+      };
     };
-    return () => ws.current?.close();
+
+    connect();
+    return () => { closed = true; ws.current?.close(); };
   }, []);
 
   const send = (msg: string) => ws.current?.send(msg);
-  return { data, connected, lastAck, send };
+
+  /** 服务器要求 token 时弹出输入框 (sessionStorage 记忆) */
+  const submitToken = (token: string) => {
+    try { sessionStorage.setItem('dshtoken', token); } catch { /* 静默 */ }
+    setNeedAuth(false);
+    retry.current = 0;
+    ws.current?.close();
+    setTimeout(() => window.location.reload(), 50);
+  };
+
+  return { data, connected, lastAck, send, needAuth, submitToken };
 }

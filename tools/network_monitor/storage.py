@@ -71,6 +71,8 @@ def compute_stats(hours: int = 24) -> Dict:
     # 延迟均值（旧记录可能缺字段，用 .get 防 KeyError）
     gw_ms = [r.get("gateway_ms") for r in records if r.get("gateway_ms") is not None]
     dns_ms = [r.get("dns_ms") for r in records if r.get("dns_ms") is not None]
+    offset_ms = [r.get("binance_offset_ms") for r in records
+                 if r.get("binance_offset_ms") is not None]
 
     last = records[-1]
     return {
@@ -80,6 +82,8 @@ def compute_stats(hours: int = 24) -> Dict:
         "down_events": down_events,
         "avg_gateway_ms": round(sum(gw_ms) / len(gw_ms), 1) if gw_ms else None,
         "avg_dns_ms": round(sum(dns_ms) / len(dns_ms), 1) if dns_ms else None,
+        "avg_binance_offset_ms": round(sum(offset_ms) / len(offset_ms), 1) if offset_ms else None,
+        "last_binance_offset_ms": last.get("binance_offset_ms"),
         "last_status": "ok" if last.get("network_ok") else "down",
         "last_record": last,
     }
@@ -103,10 +107,13 @@ def get_timeline(hours: int = 24) -> List[Dict]:
         ok_count = sum(1 for r in group if r.get("network_ok"))
         gw_ms = [r["gateway_ms"] for r in group if r.get("gateway_ms") is not None]
         dns_ms = [r["dns_ms"] for r in group if r.get("dns_ms") is not None]
+        offset_ms = [r["binance_offset_ms"] for r in group
+                     if r.get("binance_offset_ms") is not None]
         timeline.append({
             "ts": minute * 60,
             "ok": ok_count == len(group),
             "gateway_ms": round(sum(gw_ms) / len(gw_ms), 1) if gw_ms else None,
             "dns_ms": round(sum(dns_ms) / len(dns_ms), 1) if dns_ms else None,
+            "binance_offset_ms": round(sum(offset_ms) / len(offset_ms), 1) if offset_ms else None,
         })
     return timeline

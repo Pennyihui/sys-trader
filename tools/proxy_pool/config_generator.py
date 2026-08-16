@@ -11,12 +11,14 @@
 """
 
 import logging
+import os
 from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
 # mihomo external-controller（core_manager.py 使用同一个 secret 做热重载）
-CONTROLLER_SECRET = "proxy-pool-2026"
+# 2026-08-16 审计: 不再硬编码, 可用 PROXY_POOL_API_TOKEN 覆盖 (需与 mihomo 配置同步)
+CONTROLLER_SECRET = os.environ.get("PROXY_POOL_API_TOKEN", "proxy-pool-2026")
 
 # base 段（原 Clash Verge config.yaml 的等价物，现在归服务管）
 BASE_CONFIG = {

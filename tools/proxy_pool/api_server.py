@@ -23,10 +23,17 @@ def _load_pool() -> Dict:
 class PoolAPIHandler(BaseHTTPRequestHandler):
     """HTTP API 请求处理器。"""
 
+    # 2026-08-16 审计: /proxies 返回含 password/uuid 的节点全量, 必须鉴权;
+    # 同时移除 CORS *, 防任意网页跨域窃取代理凭据
+    SECRET = os.environ.get("PROXY_POOL_API_TOKEN", "proxy-pool-2026")
+
+    def _authed(self) -> bool:
+        auth = self.headers.get("Authorization", "")
+        return auth == f"Bearer {self.SECRET}"
+
     def _send_json(self, data: dict, status: int = 200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
@@ -58,6 +65,9 @@ class PoolAPIHandler(BaseHTTPRequestHandler):
             })
 
         elif path == "/proxies":
+            if not self._authed():
+                self._send_json({"status": "error", "message": "unauthorized"}, 401)
+                return
             if params.get("healthy", ["false"])[0].lower() == "true":
                 self._send_json({
                     "status": "ok",

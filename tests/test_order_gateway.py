@@ -1,5 +1,6 @@
 import os
 import pytest
+import requests
 from unittest.mock import patch, MagicMock
 from execution.order_gateway import OrderGateway, OrderRequest, OrderResponse
 
@@ -155,6 +156,29 @@ class TestOrderGatewayRequestRetry:
         assert result["orderId"] == 44
         assert mock_post.call_count == 2
 
+    def test_list_response_body_passes_through(self):
+        """list 型成功响应 (如 /fapi/v1/income) 原样返回, 不因 body.get 崩溃
+        (2026-08-16: 旧实现 _is_business_retryable 对 list 调 .get 直接炸)。"""
+        rows = [{"incomeType": "COMMISSION", "income": "-0.01", "asset": "USDT"}]
+        ok = self._resp(200, rows)
+        with patch("execution.order_gateway.requests.get",
+                   side_effect=[ok]) as mock_get:
+            result = self.gw._request("GET", "/fapi/v1/income", {})
+        assert result == rows
+        assert mock_get.call_count == 1
+
+    def test_put_method_uses_requests_put(self):
+        """PUT 请求走 requests.put (2026-08-16: 旧实现落到 else 发 GET,
+        listenKey 保活 PUT /fapi/v1/listenKey 实际发成 GET → 必失败)。"""
+        ok = self._resp(200, {})
+        with patch("execution.order_gateway.requests.put",
+                   side_effect=[ok]) as mock_put, \
+                patch("execution.order_gateway.requests.get") as mock_get:
+            result = self.gw._request("PUT", "/fapi/v1/listenKey", {})
+        assert result == {}
+        assert mock_put.call_count == 1
+        assert mock_get.call_count == 0
+
 
 class TestServerTimeSync:
     """服务器时钟校准（-1021 根治，Task 20 补充）。"""
@@ -242,13 +266,26 @@ class TestServerTimeSync:
             result = self.gw._request("GET", "/fapi/v2/account", {})
         assert result["orderId"] == 3
 
-    def test_non_json_200_body_returns_empty_immediately(self):
-        """200 但 body 非 JSON（非重试条件）：返回 {}，不再触发外层重试。"""
+    def test_non_json_200_body_raises_after_outer_retry(self):
+        """200 但 body 非 JSON (代理/CDN 故障): 抛错走外层 @retrier 重试,
+        不再静默返回 {} 伪装成业务拒单 (2026-08-16 审计修复)。"""
         bad = self._resp(200, {})
         bad.json.side_effect = ValueError("no json body")
         bad.text = "<html>ok page</html>"
         with patch("execution.order_gateway.requests.post",
-                   side_effect=[bad]) as mock_post:
-            result = self.gw._request("POST", "/fapi/v1/order", {})
-        assert result == {}
-        assert mock_post.call_count == 1
+                   side_effect=[bad, bad, bad]) as mock_post, \
+                patch("shared.retry.time.sleep"):  # 跳过退避等待
+            with pytest.raises(requests.exceptions.RequestException):
+                self.gw._request("POST", "/fapi/v1/order", {})
+        assert mock_post.call_count == 3  # 外层 @retrier 共 3 次尝试
+
+    def test_http_5xx_raises_after_outer_retry(self):
+        """HTTP 5xx (网关/代理层故障): 抛 HTTPError 走外层重试, 耗尽后抛出,
+        由调用方记录为 ERROR (不再静默丢单) (2026-08-16 审计修复)。"""
+        bad = self._resp(502, {"code": -1001, "msg": "Internal error"})
+        with patch("execution.order_gateway.requests.post",
+                   side_effect=[bad, bad, bad]) as mock_post, \
+                patch("shared.retry.time.sleep"):
+            with pytest.raises(requests.exceptions.HTTPError):
+                self.gw._request("POST", "/fapi/v1/order", {})
+        assert mock_post.call_count == 3

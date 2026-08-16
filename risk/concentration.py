@@ -17,14 +17,16 @@ class ConcentrationCheck(Middleware):
                 modifications: Dict[str, Any] = None) -> MiddlewareResult:
         if portfolio.total_equity <= 0:
             return MiddlewareResult(rejected=True, reason="ConcentrationCheck: equity <= 0")
-        # 本次拟开仓的保证金计入判断 (position_size 由链上 PositionSizer 先行产出)。
-        # 拟开仓名义价值按 runner 下单上限 (5-100 USDT) 封顶, 避免以风控原始 size
-        # (可能远大于实际可成交数量) 估算导致误拒。
+        # 2026-08-16: 拟开仓杠杆取信号实际值 (原硬编码 self.leverage=3,
+        # 与 _sync_account_config 设置的实际杠杆脱节 → 保证金低估)
+        lev = float(getattr(signal, "leverage", self.leverage) or self.leverage or 3)
+        if lev <= 0:
+            lev = 3.0
         proposed_size = (modifications or {}).get("position_size", 0.0) or 0.0
         proposed_margin = 0.0
         if proposed_size > 0 and signal.entry_price > 0:
             proposed_notional = min(proposed_size * signal.entry_price, 100.0)
-            proposed_margin = proposed_notional / self.leverage
+            proposed_margin = proposed_notional / lev
         sym_margin = portfolio.margin_for_symbol(signal.symbol) + proposed_margin
         sym_ratio = sym_margin / portfolio.total_equity
         if sym_ratio >= self.max_per_symbol:

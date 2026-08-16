@@ -45,11 +45,11 @@ class TestSoakWatchdog:
         assert m["errors_last_hour"] == 1
 
     def test_csv_row_is_delta_not_cumulative(self, tmp_path):
-        """追加行写入的是增量而非累计值（列名 errors_delta）。"""
+        """追加行写入的是增量而非累计值（列名 errors_delta, 2026-08-16 加 cpu_pct 列）。"""
         out = tmp_path / "soak_metrics.csv"
         log = tmp_path / "systrader.log"
         log.write_text("INFO a\nERROR one\n", encoding="utf-8")
-        out.write_text("ts,rss_mb,errors_delta\n", encoding="utf-8")
+        out.write_text("ts,rss_mb,cpu_pct,errors_delta\n", encoding="utf-8")
         last = sample_and_append(str(out), str(log), 0)
         assert last == 1
         log.write_text("INFO a\nERROR one\nWARNING two\nERROR three\n",
@@ -57,6 +57,6 @@ class TestSoakWatchdog:
         last = sample_and_append(str(out), str(log), last)
         assert last == 3
         lines = out.read_text(encoding="utf-8").strip().splitlines()
-        assert lines[0] == "ts,rss_mb,errors_delta"
-        assert lines[1].split(",")[2] == "1"
-        assert lines[2].split(",")[2] == "2"
+        assert lines[0] == "ts,rss_mb,cpu_pct,errors_delta"
+        assert lines[1].split(",")[3] == "1"
+        assert lines[2].split(",")[3] == "2"

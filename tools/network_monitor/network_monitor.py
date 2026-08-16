@@ -46,12 +46,13 @@ def run_probe_cycle(notifier) -> dict:
 
     status = "OK" if result.get("network_ok") else "DOWN"
     logger.info(
-        "[%s] gw=%.0fms dns=%.0fms clash=%s pool=%s",
+        "[%s] gw=%.0fms dns=%.0fms clash=%s pool=%s offset=%sms",
         status,
         result.get("gateway_ms") or 0,
         result.get("dns_ms") or 0,
         "Y" if result.get("clash_ok") else "N",
         "Y" if result.get("pool_ok") else "N",
+        result.get("binance_offset_ms") if result.get("binance_offset_ms") is not None else "?",
     )
     return result
 

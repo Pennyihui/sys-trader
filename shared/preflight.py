@@ -47,7 +47,17 @@ class PreflightChecker:
         can_trade = acc.get("canTrade", False)
         self.results.append(CheckResult("can_trade", can_trade,
                                         "enabled" if can_trade else "DISABLED"))
-        total = sum(float(a.get("walletBalance", 0)) for a in acc.get("assets", []))
+        # 提现权限 (P1-7): 交易账户建议禁提现, 开着只告警不阻断
+        if acc.get("canWithdraw", False):
+            self.results.append(CheckResult(
+                "withdraw_permission", True,
+                "WARN: 提现权限已开启, 建议在币安后台禁用该 Key 的提现"))
+        else:
+            self.results.append(CheckResult("withdraw_permission", True, "提现已禁用"))
+        # 权益口径 (P0-4): totalWalletBalance 含未实现盈亏
+        total_wb = acc.get("totalWalletBalance")
+        total = float(total_wb) if total_wb else sum(
+            float(a.get("walletBalance", 0)) for a in acc.get("assets", []))
         enough = total > 10
         self.results.append(CheckResult("balance_sufficient", enough, f"{total:.2f} USDT"))
         all_pass = all(r.passed for r in self.results)

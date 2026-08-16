@@ -29,10 +29,12 @@ class DrawdownBreaker(Middleware):
                 remaining = int((self.cooldown_seconds - (time.time() - self._triggered_at)) / 60)
                 return MiddlewareResult(rejected=True, reason=f"DrawdownBreaker: cooldown, {remaining}min remaining")
         if portfolio.current_drawdown >= self.max_drawdown:
-            self.state = BreakerState.TRIGGERED
+            # 2026-08-16 审计: 回撤触发与连亏触发统一进 COOLDOWN——
+            # 旧实现回撤一恢复立即恢复开仓 (无冷却无滞回), 两路径不一致。
+            self._triggered_at = time.time()
+            self.state = BreakerState.COOLDOWN
             return MiddlewareResult(rejected=True, reason=f"DrawdownBreaker: drawdown {portfolio.current_drawdown:.2%} >= {self.max_drawdown:.0%}")
         if portfolio.consecutive_losses >= self.consecutive_loss_breaker:
-            self.state = BreakerState.TRIGGERED
             self._triggered_at = time.time()
             self.state = BreakerState.COOLDOWN
             return MiddlewareResult(rejected=True, reason=f"DrawdownBreaker: {portfolio.consecutive_losses} consecutive losses")

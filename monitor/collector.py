@@ -61,3 +61,13 @@ class MetricsCollector:
     def get_gauge(self, metric: str) -> float:
         with self._lock:
             return self._gauges.get(metric, 0.0)
+
+    def snapshot(self) -> dict:
+        """完整快照: 心跳年龄/计数器/仪表值 (2026-08-16 P2-4 /metrics 用)。"""
+        now = time.time()
+        with self._lock:
+            return {
+                "heartbeats": {mod: round(now - ts, 1) for mod, ts in self._heartbeats.items()},
+                "counters": dict(self._counters),
+                "gauges": dict(self._gauges),
+            }

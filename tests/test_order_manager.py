@@ -22,10 +22,21 @@ class TestOrderManager:
         assert order.state == OrderState.PENDING
 
     def test_execute_signal_places_entry_stop_and_take_profit(self):
+        # 入场即时成交 → 立即挂 SL/TP (2026-08-16 审计: PENDING 时延后挂单)
+        self.gateway.place_order.return_value = OrderResponse(
+            order_id=42, symbol="BTCUSDT", side="BUY", status="FILLED",
+            executed_qty=0.15, avg_price=62500.0)
         orders = self.manager.execute_signal("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
         assert len(orders) == 3
         assert self.gateway.place_order.call_count == 1       # entry via place_order
         assert self.gateway.place_algo_order.call_count == 2  # SL + TP via place_algo_order
+
+    def test_pending_entry_defers_sl_tp(self):
+        """入场 PENDING → 不下 SL/TP (成交确认后再补挂), 防成交前保护单先触发被拒。"""
+        orders = self.manager.execute_signal("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
+        assert len(orders) == 1
+        assert orders[0].state == OrderState.PENDING
+        assert self.gateway.place_algo_order.call_count == 0
 
     def test_order_state_transitions(self):
         self.gateway.place_order.return_value = OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0)
@@ -50,14 +61,17 @@ class TestOrderManager:
         assert order.order_id == 99
 
     def test_active_orders_filters_non_pending(self):
-        self.gateway.place_order.side_effect = [
-            OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0),
-            OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0),
-            OrderResponse(order_id=1, symbol="BTCUSDT", side="BUY", status="NEW", executed_qty=0.0, avg_price=0.0),
+        # 入场即时成交 FILLED + SL/TP PENDING → 活跃集 = 2 个保护单
+        self.gateway.place_order.return_value = OrderResponse(
+            order_id=1, symbol="BTCUSDT", side="BUY", status="FILLED",
+            executed_qty=0.15, avg_price=62500.0)
+        self.gateway.place_algo_order.side_effect = [
+            AlgoOrderResponse(algo_id=100, symbol="BTCUSDT", side="SELL", status="NEW"),
+            AlgoOrderResponse(algo_id=101, symbol="BTCUSDT", side="SELL", status="NEW"),
         ]
         self.manager.execute_signal("BTCUSDT", "LONG", 0.15, 62500.0, 61500.0, 65000.0)
         active = self.manager.active_orders
-        assert len(active) == 3
+        assert len(active) == 2  # SL + TP (FILLED 入场单不在活跃集)
 
     def test_entry_rejected_skips_sl_tp(self):
         """入场单被拒 → 不再下止损/止盈, 只返回入场单。"""
@@ -179,3 +193,60 @@ def test_dry_run_does_not_publish():
     mgr = OrderManager(gateway=gw, event_bus=bus)  # 默认 DRY_RUN
     mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
     bus.publish.assert_not_called()
+
+
+@pytest.mark.unit
+def test_validate_protection_geometry():
+    """SL/TP 与方向的价格几何校验 (2026-08-16 审计)。"""
+    assert OrderManager.validate_protection("LONG", 64000.0, 62000.0, 68000.0) is None
+    assert OrderManager.validate_protection("SHORT", 64000.0, 66000.0, 62000.0) is None
+    assert "stop_loss" in OrderManager.validate_protection("LONG", 64000.0, 65000.0, 68000.0)
+    assert "take_profit" in OrderManager.validate_protection("LONG", 64000.0, 62000.0, 63000.0)
+    assert "stop_loss" in OrderManager.validate_protection("SHORT", 64000.0, 63000.0, 62000.0)
+
+
+@pytest.mark.unit
+def test_invalid_protection_geometry_rejects_signal():
+    """几何非法 → execute_signal 返回 REJECTED 入场单, 不触达 gateway。"""
+    gw = MagicMock()
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
+    orders = mgr.execute_signal("BTCUSDT", "LONG", 0.1, 64000.0, 65000.0, 68000.0)  # SL 高于入场
+    assert len(orders) == 1
+    assert orders[0].state == OrderState.REJECTED
+    gw.place_order.assert_not_called()
+
+
+@pytest.mark.unit
+def test_sync_entry_fills_polls_and_updates_state():
+    """LIVE 模式 PENDING 入场单经轮询确认成交 (2026-08-16 审计)。"""
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(
+        order_id=9, symbol="BTCUSDT", side="BUY", status="NEW",
+        executed_qty=0.0, avg_price=0.0)
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
+    entry = mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    assert entry.state == OrderState.PENDING
+    gw.query_order_status.return_value = {
+        "status": "FILLED", "executedQty": "0.1", "avgPrice": "63900.0",
+    }
+    filled = mgr.sync_entry_fills()
+    assert len(filled) == 1
+    assert entry.state == OrderState.FILLED
+    assert entry.filled_qty == 0.1
+    # 非 LIVE 模式不触达真实网关
+    mgr2 = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.DRY_RUN))
+    assert mgr2.sync_entry_fills() == []
+
+
+@pytest.mark.unit
+def test_submit_entry_attaches_client_order_id():
+    """入场单携带 newClientOrderId 幂等键 (重试复用)。"""
+    gw = MagicMock()
+    gw.place_order.return_value = OrderResponse(
+        order_id=1, symbol="BTCUSDT", side="BUY", status="NEW",
+        executed_qty=0.0, avg_price=0.0)
+    mgr = OrderManager(gateway=gw, execution_mode=ExecutionModeManager(ExecutionMode.LIVE))
+    order = mgr.submit_entry("BTCUSDT", "LONG", 0.1, 64000.0, 62000.0, 68000.0)
+    assert order.client_order_id.startswith("e")
+    req = gw.place_order.call_args[0][0]
+    assert req.client_order_id == order.client_order_id

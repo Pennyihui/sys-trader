@@ -31,6 +31,9 @@ module.exports = {
       interpreter: "python",
       max_memory_restart: "300M",
       autorestart: true,
+      // 端口冲突或异常退出 10 次后停止重启（避免无限崩溃循环）
+      max_restarts: 10,
+      exp_backoff_restart_delay: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
       },

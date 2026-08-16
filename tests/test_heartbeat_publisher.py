@@ -45,6 +45,10 @@ def test_payload_includes_stats_gauges():
     assert payload["stats"] == {
         "kline_closes": 42, "orders_placed": 7, "orders_failed": 1,
         "server_time_offset": 0.0,
+        "ws_connected": 0.0, "ws_total": 0.0, "funding_cost": 0.0,
+        "risk_per_trade": 0.0, "max_leverage": 0.0,
+        # 风控补强 (2026-08-16 #3/#4)
+        "max_trades_day": 0.0, "max_stop_pct": 0.0,
     }
 
 
@@ -76,7 +80,10 @@ def test_run_loop_survives_exception(monkeypatch):
     monkeypatch.setattr(HeartbeatPublisher, "_run_once", exploding_run_once)
     publisher = HeartbeatPublisher(MagicMock(), interval=0.01)
     publisher.start()
-    time.sleep(0.05)
+    # 有界等待: 原实现固定 sleep 0.05s 断言 >=2, 机器负载高时会偶发 1 次 (flaky)
+    deadline = time.time() + 2.0
+    while len(attempts) < 2 and time.time() < deadline:
+        time.sleep(0.02)
     publisher.stop()
     assert len(attempts) >= 2  # 抛异常后循环仍存活
 

@@ -95,23 +95,34 @@ class EventBus:
 
     def _deliver(self, stream: str, consumer_group: str, key: str, msg_id, fields: dict,
                  handler: Callable[[Event], None]):
-        """处理单条消息: 解析或回调异常捕获后记日志并 ACK, 避免消息永久滞留 PEL。
+        """处理单条消息: 解析或回调异常时立即重试一次再 ACK。
 
-        消费失败的消息经 _retry_pending 重试一次后仍失败则 ACK 丢弃并记日志,
-        防止其永不重投地留在 PEL。
+        原实现异常后无条件 ACK, "失败重试"承诺落空 (2026-08-16 审计修复)。
+        重试一次后仍失败则 ACK 丢弃并记日志, 防止消息永久滞留 PEL;
+        跨崩溃的滞留消息由 _retry_pending (XAUTOCLAIM) 兜底。
         """
-        try:
-            fields = {k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v for k, v in fields.items()}
-            payload = json.loads(fields.get("payload", "{}"))
-            event = Event(stream=payload.get("stream", stream), data=payload.get("data", {}), event_id=payload.get("event_id", ""), timestamp=payload.get("timestamp", ""))
-            handler(event)
-        except Exception as e:
-            logger.error("EventBus consume failed [%s/%s] msg=%s: %s", stream, consumer_group, msg_id, e)
-        finally:
+        last_error = None
+        for attempt in (1, 2):
             try:
-                self.redis.xack(key, consumer_group, msg_id)
+                fields = {k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v for k, v in fields.items()}
+                payload = json.loads(fields.get("payload", "{}"))
+                event = Event(stream=payload.get("stream", stream), data=payload.get("data", {}), event_id=payload.get("event_id", ""), timestamp=payload.get("timestamp", ""))
+                handler(event)
+                last_error = None
+                break
             except Exception as e:
-                logger.warning("EventBus xack failed [%s/%s] msg=%s: %s", stream, consumer_group, msg_id, e)
+                last_error = e
+                logger.error("EventBus consume failed [%s/%s] msg=%s attempt=%d: %s",
+                             stream, consumer_group, msg_id, attempt, e)
+                if attempt == 1:
+                    time.sleep(0.2)  # 短暂等待后重试一次
+        if last_error is not None:
+            logger.error("EventBus dropping msg [%s/%s] msg=%s after retry: %s",
+                         stream, consumer_group, msg_id, last_error)
+        try:
+            self.redis.xack(key, consumer_group, msg_id)
+        except Exception as e:
+            logger.warning("EventBus xack failed [%s/%s] msg=%s: %s", stream, consumer_group, msg_id, e)
 
     def run_consumer(self, stream: str, consumer_group: str, handler: Callable[[Event], None], count: int = 5, block: int = 100):
         key = self._key(stream)
@@ -125,7 +136,9 @@ class EventBus:
                 self._poll_once(stream, consumer_group, handler, count=count, block=block)
             except Exception as e:
                 logger.error("EventBus consumer error [%s/%s]: %s", stream, consumer_group, e)
-                self._stop.wait(timeout=1)
+                # 2026-08-16 审计: Redis 不可达时原实现每秒刷屏 ERROR;
+                # 退避 5s 再试, 降低日志风暴
+                self._stop.wait(timeout=5)
 
     def stop(self):
         self._stop.set()

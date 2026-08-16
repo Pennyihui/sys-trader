@@ -1,5 +1,6 @@
 """Alerter — threshold checking and alert dispatching."""
 
+import threading
 import time
 import logging
 from dataclasses import dataclass, field
@@ -26,13 +27,31 @@ class Alert:
 
 
 class Alerter:
+    # 同 metric 告警节流窗口 (秒): 心跳/阈值循环高频调用, 无节流会告警风暴
+    THROTTLE_SECONDS = 60.0
+    MAX_ALERTS = 500  # 列表上限, 防止长跑无限增长
+
     def __init__(self, on_alert: Optional[Callable[[Alert], None]] = None):
         self.on_alert = on_alert or (lambda a: None)
         self._alerts: list[Alert] = []
+        self._last_fired: Dict[str, float] = {}
+        # 2026-08-16 审计: fire() 无锁, 多线程告警并发写 _alerts/_last_fired
+        self._lock = threading.Lock()
 
     def fire(self, level: AlertLevel, metric: str, message: str, context: Optional[dict] = None):
+        # 节流: 同 metric 在窗口内重复触发只记 DEBUG, 不重复推送
+        now = time.time()
+        with self._lock:
+            last = self._last_fired.get(metric, 0.0)
+            if now - last < self.THROTTLE_SECONDS:
+                logger.debug("ALERT throttled [%s] %s", level.value, metric)
+                return None
+            self._last_fired[metric] = now
         alert = Alert(level=level, metric=metric, message=message, context=context or {})
-        self._alerts.append(alert)
+        with self._lock:
+            self._alerts.append(alert)
+            if len(self._alerts) > self.MAX_ALERTS:
+                self._alerts = self._alerts[-self.MAX_ALERTS:]
         self.on_alert(alert)
         logger.log(
             {"INFO": 20, "WARNING": 30, "CRITICAL": 40}.get(level.value, 20),
@@ -56,14 +75,19 @@ class Alerter:
             self.fire(AlertLevel.CRITICAL, f"heartbeat.{module}", f"{module} heartbeat timeout: {time.time() - last:.0f}s since last beat")
 
     def check_thresholds(self, collector: MetricsCollector, portfolio: Any = None):
-        if portfolio is not None:
-            margin_ratio = portfolio.margin_ratio
+        if portfolio is None:
+            return
+        # 属性缺失防御: 传入对象没有 margin_ratio/current_drawdown 时
+        # 直接跳过, 不再 AttributeError 炸掉监控循环 (2026-08-16 审计)。
+        margin_ratio = getattr(portfolio, "margin_ratio", None)
+        if margin_ratio is not None:
             if margin_ratio > 0.80:
                 self.fire(AlertLevel.CRITICAL, "margin_ratio", f"Margin ratio {margin_ratio:.1%} > 80%", {"margin_ratio": margin_ratio})
             elif margin_ratio > 0.60:
                 self.fire(AlertLevel.WARNING, "margin_ratio", f"Margin ratio {margin_ratio:.1%} > 60%", {"margin_ratio": margin_ratio})
 
-            dd = portfolio.current_drawdown
+        dd = getattr(portfolio, "current_drawdown", None)
+        if dd is not None:
             if dd > 0.15:
                 self.fire(AlertLevel.CRITICAL, "drawdown", f"Drawdown {dd:.1%} > 15%", {"drawdown": dd})
             elif dd > 0.10:

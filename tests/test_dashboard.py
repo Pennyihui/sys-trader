@@ -73,6 +73,38 @@ class TestDataCollector:
         assert data["orders"] == []
         assert data["heartbeats"] == {}
 
+    def test_tickers_filtered_to_whitelist(self, monkeypatch):
+        """行情条只返回白名单交易对 (2026-08-16: 修复全市场刷屏)。"""
+        monkeypatch.setenv("DASHBOARD_SYMBOLS", "BTCUSDT,ETHUSDT")
+        all_market = [
+            {"symbol": "BTCUSDT", "lastPrice": "63000", "priceChangePercent": "1.5",
+             "highPrice": "64000", "lowPrice": "62000"},
+            {"symbol": "ETHUSDT", "lastPrice": "1880", "priceChangePercent": "-0.5",
+             "highPrice": "1900", "lowPrice": "1860"},
+            {"symbol": "我踏马来了USDT", "lastPrice": "0.01", "priceChangePercent": "4.4",
+             "highPrice": "0.02", "lowPrice": "0.01"},
+        ]
+
+        class _Resp:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                import json as _j
+                return _j.dumps(all_market).encode()
+
+        class _Opener:
+            def open(self, req, timeout):
+                return _Resp()
+
+        import dashboard.data_collector as dc
+        dc._TICKER_CACHE = []
+        dc._TICKER_CACHE_TS = 0.0
+        monkeypatch.setattr(dc.urllib.request, "build_opener", lambda handler: _Opener())
+        tickers = self.collector._collect_tickers()
+        assert [t["symbol"] for t in tickers] == ["BTCUSDT", "ETHUSDT"]
+
 
 @pytest.mark.unit
 class TestCreateApp:

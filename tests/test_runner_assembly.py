@@ -21,8 +21,11 @@ def _isolate_metrics():
 
 @pytest.fixture
 def runner():
+    # 2026-08-16 审计: 必须 mock OrderGateway, 否则 initialize() 里的
+    # _sync_account_config/_fetch_exchange_filters 每轮打真实 testnet HTTP
     with patch("shared.runner.PreflightChecker") as MockPreflight, \
-         patch("shared.runner.PositionReconciler") as MockReconciler:
+         patch("shared.runner.PositionReconciler") as MockReconciler, \
+         patch("shared.runner.OrderGateway") as MockGW:
         MockPreflight.return_value.run_all.return_value = {
             "assets": [{"walletBalance": "10000"}],
         }
@@ -59,10 +62,19 @@ def _entry_order() -> ManagedOrder:
     )
 
 
+def _filled_entry_order() -> ManagedOrder:
+    """入场单即时成交 FILLED (2026-08-16 起: 只有已成交才登记持仓/挂保护)。"""
+    return ManagedOrder(
+        order_id=1, symbol="BTCUSDT", side="BUY", order_type="LIMIT",
+        quantity=0.001, price=64000.0, state=OrderState.FILLED,
+        filled_qty=0.001, avg_price=64000.0,
+    )
+
+
 @pytest.mark.unit
 def test_initialize_wires_full_assembly(runner):
     """装配后策略/风控/执行层全部就绪。"""
-    with patch.object(runner, "_fetch_step_sizes", return_value={"BTCUSDT": 0.001}):
+    with patch.object(runner, "_fetch_exchange_filters", return_value=({"BTCUSDT": 0.001}, {"BTCUSDT": 0.10})):
         runner.initialize()
     assert runner.engine is not None
     assert runner.risk_chain is not None
@@ -70,9 +82,10 @@ def test_initialize_wires_full_assembly(runner):
     assert runner.feed.on_kline_closed is not None
 
 
+@patch("shared.runner.OrderGateway")
 @patch("shared.runner.PreflightChecker")
 @patch("shared.runner.PositionReconciler")
-def test_paper_mode_wires_paper_trader(MockReconciler, MockPreflight):
+def test_paper_mode_wires_paper_trader(MockReconciler, MockPreflight, MockGW):
     """PAPER 模式构造 PaperTrader 并传给 OrderManager (否则零下单)。"""
     MockPreflight.return_value.run_all.return_value = {
         "assets": [{"walletBalance": "10000"}],
@@ -80,7 +93,7 @@ def test_paper_mode_wires_paper_trader(MockReconciler, MockPreflight):
     r = SystemRunner(execution_mode_name="paper")
     r.gateway = MagicMock()
     r.feed = MagicMock()
-    with patch.object(r, "_fetch_step_sizes", return_value={}):
+    with patch.object(r, "_fetch_exchange_filters", return_value=({}, {})):
         r.initialize()
     assert r.orders.paper_trader is not None
     assert r.orders.execution_mode.mode == ExecutionMode.PAPER
@@ -89,7 +102,7 @@ def test_paper_mode_wires_paper_trader(MockReconciler, MockPreflight):
 
 def test_live_mode_no_paper_trader(runner):
     """LIVE 模式不接 PaperTrader。"""
-    with patch.object(runner, "_fetch_step_sizes", return_value={}):
+    with patch.object(runner, "_fetch_exchange_filters", return_value=({}, {})):
         runner.initialize()
     assert runner.orders.paper_trader is None
     assert runner.orders.execution_mode.mode == ExecutionMode.LIVE
@@ -106,7 +119,7 @@ def test_paper_mode_execute_signal_goes_through_paper_trader(MockReconciler, Moc
     r = SystemRunner(execution_mode_name="paper")
     r.feed = MagicMock()
     r.feed.get_last_price.return_value = 64000.0
-    with patch.object(r, "_fetch_step_sizes", return_value={"BTCUSDT": 0.001}):
+    with patch.object(r, "_fetch_exchange_filters", return_value=({"BTCUSDT": 0.001}, {"BTCUSDT": 0.10})):
         r.initialize()
     orders = r.orders.execute_signal("BTCUSDT", "LONG", 0.001, 64000.0, 62000.0, 68000.0)
     # 入场 LIMIT 即时成交 FILLED, 条件单挂起 NEW → PENDING
@@ -116,9 +129,10 @@ def test_paper_mode_execute_signal_goes_through_paper_trader(MockReconciler, Moc
     MockGW.return_value.place_algo_order.assert_not_called()
 
 
+@patch("shared.runner.OrderGateway")
 @patch("shared.runner.PreflightChecker")
 @patch("shared.runner.PositionReconciler")
-def test_initialize_wires_reconcile_drift_callback(MockReconciler, MockPreflight):
+def test_initialize_wires_reconcile_drift_callback(MockReconciler, MockPreflight, MockGW):
     """对账漂移回调接线: 交易所持仓消失 → close_position 同步本地。"""
     MockPreflight.return_value.run_all.return_value = {
         "assets": [{"walletBalance": "10000"}],
@@ -126,19 +140,34 @@ def test_initialize_wires_reconcile_drift_callback(MockReconciler, MockPreflight
     r = SystemRunner()
     r.gateway = MagicMock()
     r.feed = MagicMock()
-    with patch.object(r, "_fetch_step_sizes", return_value={}):
+    with patch.object(r, "_fetch_exchange_filters", return_value=({}, {})):
         r.initialize()
     call_kwargs = MockReconciler.call_args[1]
     assert callable(call_kwargs.get("on_drift"))
 
 
 def test_refresh_equity_updates_portfolio(runner):
-    """周期权益刷新: gateway walletBalance → portfolio.update_equity。"""
+    """周期权益刷新: totalWalletBalance (含未实现) → portfolio.update_equity (2026-08-16 P0-4)。"""
     runner.gateway.get_account.return_value = {
-        "assets": [{"walletBalance": "9500"}],
+        "totalWalletBalance": "9500",
+        "assets": [{"walletBalance": "9000", "availableBalance": "8500", "asset": "USDT"}],
     }
     runner._refresh_equity()
-    runner.portfolio.update_equity.assert_called_once_with(9500.0)
+    kwargs = runner.portfolio.update_equity.call_args[1]
+    assert kwargs["available_balance"] == 8500.0
+    assert kwargs["assets"] == [{"asset": "USDT", "walletBalance": 9000.0}]
+    runner.portfolio.update_equity.assert_called_once_with(9500.0, **kwargs)
+
+
+def test_refresh_equity_falls_back_to_assets_sum(runner):
+    """无 totalWalletBalance 字段时回退各资产 walletBalance 之和。"""
+    runner.gateway.get_account.return_value = {
+        "assets": [{"walletBalance": "9000", "availableBalance": "8800", "asset": "USDT"}],
+    }
+    runner._refresh_equity()
+    kwargs = runner.portfolio.update_equity.call_args[1]
+    assert kwargs["available_balance"] == 8800.0
+    runner.portfolio.update_equity.assert_called_once_with(9000.0, **kwargs)
 
 
 def test_refresh_equity_ignores_failure(runner):
@@ -159,9 +188,9 @@ def test_reconcile_drift_syncs_closed_position(runner):
 
 @pytest.mark.unit
 def test_on_kline_closed_15m_generates_signal(runner):
-    """15m K线闭合 → 信号 → 风控 → 下单全链路 (成功路径)。"""
+    """15m K线闭合 → 信号 → 风控 → 下单全链路 (入场即时成交路径)。"""
     _wire_signal_chain(runner)
-    runner.orders.execute_signal.return_value = [_entry_order()]
+    runner.orders.execute_signal.return_value = [_filled_entry_order()]
 
     runner._on_kline_closed("BTCUSDT", "15m", [MagicMock()])
 
@@ -171,6 +200,19 @@ def test_on_kline_closed_15m_generates_signal(runner):
     runner.portfolio.open_position.assert_called_once()
     assert runner.stats["kline_closes"] == 1
     assert runner.stats["signals"] == 1
+    assert runner.stats["orders_placed"] == 1
+    assert runner.stats["orders_failed"] == 0
+
+
+@pytest.mark.unit
+def test_pending_entry_does_not_register_position(runner):
+    """入场单 PENDING → 不登记持仓 (成交确认后由 _sync_entry_fills 登记, 2026-08-16 审计)。"""
+    _wire_signal_chain(runner)
+    runner.orders.execute_signal.return_value = [_entry_order()]
+
+    runner._on_kline_closed("BTCUSDT", "15m", [MagicMock()])
+
+    runner.portfolio.open_position.assert_not_called()
     assert runner.stats["orders_placed"] == 1
     assert runner.stats["orders_failed"] == 0
 
@@ -271,7 +313,7 @@ def test_proxy_host_from_env(monkeypatch):
             "assets": [{"walletBalance": "10000"}],
         }
         r = SystemRunner()
-        with patch.object(r, "_fetch_step_sizes", return_value={"BTCUSDT": 0.001}):
+        with patch.object(r, "_fetch_exchange_filters", return_value=({"BTCUSDT": 0.001}, {"BTCUSDT": 0.10})):
             r.initialize()
         assert captured["proxy_host"] == "host.docker.internal"
         assert captured["proxy_port"] == 7890
@@ -301,15 +343,15 @@ def test_hours_positive_bounds_run():
 # ─── Ops T5: 数据停滞熔断 / PENDING 超时撤单 / stats gauges ───
 
 
-def _simulate_no_price(runner):
-    """全部 symbol 无价格且进入停滞判定窗口 (每次判定后需重置窗口模拟下一个 120s)。
+def _simulate_stall(runner):
+    """全部 symbol 数据流停滞: 最后行情消息时间戳已超过 STALE_THRESHOLD。
 
-    注: 每次停滞判定后 _last_data_ts 被重置, 下一次判定需再等一个 STALE_THRESHOLD
-    窗口 — 与生产语义一致 (连续 strike = 连续多个无数据窗口, 3 次 ≈ 6 分钟)。
+    停滞语义 (2026-08-16 审计重写): 依据"最后消息年龄"判定——旧实现用
+    缓存价 is None 判定, 缓存价收到过一次就永不为 None, 熔断防线形同虚设。
     """
-    runner.feed.get_last_price.return_value = None
     now = time.time()
-    runner._last_data_ts = {s: now - STALE_THRESHOLD - 1 for s in runner.symbols}
+    stale = now - STALE_THRESHOLD - 1
+    runner.feed.get_last_update_ts.return_value = stale  # 消息时间戳停滞
 
 
 @pytest.mark.unit
@@ -317,7 +359,7 @@ def test_stall_three_strikes_trigger_circuit_breaker(runner):
     """连续 3 次停滞判定 → 熔断停单 (circuit breaker 置位)。"""
     with patch.object(runner, "_network_diag"):
         for _ in range(3):
-            _simulate_no_price(runner)
+            _simulate_stall(runner)
             runner._check_stall()
     assert runner._circuit_breaker == "emergency_stop"
     # stalls 按 symbol 计数: 3 symbols × 3 次判定
@@ -329,7 +371,7 @@ def test_stall_less_than_strikes_no_breaker(runner):
     """连续 2 次停滞判定 (默认 3) 不触发熔断。"""
     with patch.object(runner, "_network_diag"):
         for _ in range(2):
-            _simulate_no_price(runner)
+            _simulate_stall(runner)
             runner._check_stall()
     assert runner._circuit_breaker is None
 
@@ -342,7 +384,7 @@ def test_stall_strikes_parameterized():
     r.feed = MagicMock()
     with patch.object(r, "_network_diag"):
         for _ in range(2):
-            _simulate_no_price(r)
+            _simulate_stall(r)
             r._check_stall()
     assert r._circuit_breaker == "emergency_stop"
 
@@ -352,26 +394,26 @@ def test_stall_breaker_no_auto_resume_on_recovery(runner):
     """价格恢复后熔断不自动解除 (需手动 resume, 与 kill switch 语义一致)。"""
     with patch.object(runner, "_network_diag"):
         for _ in range(3):
-            _simulate_no_price(runner)
+            _simulate_stall(runner)
             runner._check_stall()
     assert runner._circuit_breaker == "emergency_stop"
-    runner.feed.get_last_price.return_value = 64000.0
+    runner.feed.get_last_update_ts.return_value = time.time()
     runner._check_stall()
     assert runner._circuit_breaker == "emergency_stop"
 
 
 @pytest.mark.unit
 def test_stall_strikes_reset_on_price_recovery(runner):
-    """价格恢复清零连续停滞计数, 之后重新计数。"""
+    """数据流恢复清零连续停滞计数, 之后重新计数。"""
     with patch.object(runner, "_network_diag"):
         for _ in range(2):
-            _simulate_no_price(runner)
+            _simulate_stall(runner)
             runner._check_stall()
     assert runner._circuit_breaker is None
-    runner.feed.get_last_price.return_value = 64000.0
+    runner.feed.get_last_update_ts.return_value = time.time()
     runner._check_stall()                          # 恢复 → 计数清零
     with patch.object(runner, "_network_diag"):
-        _simulate_no_price(runner)
+        _simulate_stall(runner)
         runner._check_stall()
     assert runner._circuit_breaker is None         # 重新计数, 1 次不足 3
 

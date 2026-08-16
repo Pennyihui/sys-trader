@@ -635,3 +635,25 @@ Phase 7: 上线
   7.1 实盘资金渐进 (从小额开始)
   7.2 24h 监控观察
 ```
+
+---
+
+## 12. 实现现状与设计差异（2026-08-16 审计同步）
+
+> 本架构为 2026-07-04 初始设计。落地过程中做了多项工程取舍，以下差异以**代码现状为准**：
+
+| 设计 (本文) | 现状 | 说明 |
+|------|------|------|
+| 通知渠道 Telegram + 命令交互 | **钉钉 webhook 单向告警** (monitor/dingtalk.py + tools/*_watchdog.py) | Telegram 未实现；告警统一 `[SysTrader]` 关键词前缀 |
+| 风控链 5 中间件（含 LeverageController） | 5 中间件 ✓（2026-08-16 补上杠杆检查 risk/leverage.py） | 此前只有 4 件套 |
+| 对账周期 2 分钟 | 300 秒 | shared/reconciler.py `_CHECK_INTERVAL=300` |
+| 交易频率 低频 4h（0-3 笔/天） | 默认 `scalping_15m`（EMA 交叉测试策略） | 四层 agent_team 信号引擎迁移为**独立待办** |
+| 事件总线为"唯一媒介" | 旁路埋点 | feed → runner 直连回调；signal/order/position/heartbeat 流走 EventBus |
+| 止损/止盈用普通 STOP/TAKE_PROFIT_MARKET | **Algo Order API** `/fapi/v1/algoOrder` | 条件单端点（testnet/实盘均已验证） |
+| scheduler/ 线程池调度 | 未接线（feed 直连 `runner._on_kline_closed`） | 保留为简化取舍 |
+| execution/event_queue.py 优先级队列 | 未实现 | YAGNI（低频系统无排队需求） |
+| ws_pool.py 连接池 round-robin | 未使用（feed 用 combined stream + 4 冗余连接） | 死代码已删（2026-08-16） |
+| shared/label_factory、meta_model、sr_features | 未迁移 | 与四层信号引擎同属独立待办 |
+| Telegram /stop /pause /resume 远程命令 | dashboard 控制台命令 + `redis-cli XADD` | kill switch 接线已落地（command 流） |
+| Monitor 6 条阈值表循环 | 部分（margin_ratio/drawdown + 心跳看门狗） | 连续亏损/日亏/断连阈值由 tools/heartbeat_watchdog 外部覆盖 |
+

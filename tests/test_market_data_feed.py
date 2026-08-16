@@ -27,12 +27,13 @@ class TestMarketDataFeed:
         self.feed._on_mark_price_message({"s": "BTCUSDT", "p": "62450.0", "E": 1700000000000})
         assert self.feed._mark_prices.get("BTCUSDT") == 62450.0
 
-    def test_stream_to_timeframe_mapping(self):
-        mapping = self.feed._stream_timeframe_map(["BTCUSDT"])
-        assert "btcusdt@kline_4h" in mapping
-        assert mapping["btcusdt@kline_4h"] == "4h"
-        assert mapping["btcusdt@kline_1d"] == "1d"
-        assert mapping["btcusdt@kline_1w"] == "1w"
+    def test_stream_url_covers_all_timeframes(self):
+        """订阅清单包含 15m/1h/4h/1d/1w + markPrice + aggTrade (2026-08-16 审计:
+        原 _stream_timeframe_map 死代码已删, 订阅正确性直接校验 URL)。"""
+        url = self.feed._build_stream_url()
+        for suffix in ("kline_15m", "kline_1h", "kline_4h", "kline_1d",
+                       "kline_1w", "markPrice@1s", "aggTrade"):
+            assert f"btcusdt@{suffix}" in url
 
     def test_singleton_no_duplicate_klines_on_repeated_open_time(self):
         self.feed.buffer.add(Kline(symbol="BTCUSDT", timeframe="4h", open_time=1000, close_time=1000 + 14400000, open=62000.0, high=63000.0, low=61500.0, close=62500.0, volume=100.0, is_closed=False))

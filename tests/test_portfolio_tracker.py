@@ -66,12 +66,22 @@ class TestPortfolioTracker:
         assert self.tracker.daily_realized_pnl > 0
 
     def test_break_even_does_not_count_as_loss(self):
-        """平本 (pnl==0) 不计入连亏。"""
+        """平本 (净盈亏==0) 不计入连亏。用 fee_rate=0 构造纯平本场景;
+        默认费率下平本价卖出净盈亏为负 (手续费), 是计入连亏的。"""
+        self.tracker.fee_rate = 0.0
         self.tracker.consecutive_losses = 2
         pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
         self.tracker.open_position(pos)
         self.tracker.close_position("BTCUSDT", 60000.0)
         assert self.tracker.consecutive_losses == 2
+
+    def test_fee_makes_break_even_a_small_loss(self):
+        """默认费率下平本价平仓净亏 (手续费), 计入连亏 (2026-08-16 P0-3)。"""
+        pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
+        self.tracker.open_position(pos)
+        pnl = self.tracker.close_position("BTCUSDT", 60000.0)
+        assert pnl < 0
+        assert self.tracker.consecutive_losses == 1
 
     def test_loss_increments_consecutive_losses(self):
         pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
@@ -81,14 +91,15 @@ class TestPortfolioTracker:
 
     def test_daily_reset_before_increment(self):
         """日切重置先于累加: 跨午夜首笔开/平仓不被清零。"""
+        from datetime import timedelta
         self.tracker.daily_realized_pnl = 50.0
         self.tracker.trade_count_today = 3
-        self.tracker._last_reset_day = self.tracker._last_reset_day - 1  # 模拟跨日
+        self.tracker._last_reset_day = self.tracker._last_reset_day - timedelta(days=1)  # 模拟跨日
         pos = Position(symbol="BTCUSDT", direction="LONG", quantity=0.1, entry_price=60000.0, leverage=3)
         self.tracker.open_position(pos)
         # 跨日重置后当日计数从 1 开始, 旧计数 3 已被清零
         assert self.tracker.trade_count_today == 1
-        self.tracker._last_reset_day = self.tracker._last_reset_day - 1  # 再模拟跨日
+        self.tracker._last_reset_day = self.tracker._last_reset_day - timedelta(days=1)  # 再模拟跨日
         self.tracker.close_position("BTCUSDT", 61000.0)
         # 跨日重置后当日已实现盈亏仅包含本次平仓
         assert self.tracker.daily_realized_pnl > 0

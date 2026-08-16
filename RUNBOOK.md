@@ -36,14 +36,26 @@ redis-cli ping   # → PONG 即就绪
 ## 启动
 
 ```bash
-# PM2 方式 (推荐)
+# PM2 方式 (推荐) — systrader(主系统) + dashboard(API 后端)
 pm2 start ecosystem.config.js
 
 # 手动方式
-python -m shared.runner
+python -m shared.runner                    # 主系统 (默认 testnet)
 
-# Dashboard
+# Dashboard API 后端
+python dashboard/server.py                 # 等价于 uvicorn dashboard.server:app --host 0.0.0.0 --port 8000
+
+# Dashboard 前端 (Vite dev server, :5173)
 cd dashboard/frontend && npm run dev
+```
+
+### Docker 方式（可选，仅 Dashboard）
+
+`docker-compose.yml` 起 redis + Dashboard API + 前端。**交易主进程不容器化**——
+需访问宿主机 Clash 代理与本地 Memurai，请用 PM2/nssm 原生运行 `shared.runner`。
+
+```bash
+docker compose up -d    # redis:6379 + backend:8000 + frontend:5173
 ```
 
 ### Dashboard 环境变量
@@ -71,6 +83,24 @@ pm2 monit            # CPU/内存监控
 
 curl http://localhost:8000/health  # 健康检查
 ```
+
+## Dashboard 看板（2026-08-16 起双页签）
+
+浏览器打开 `http://localhost:5173`（前端 dev server，后端 API 在 :8000）：
+
+| 页签 | 内容 |
+|------|------|
+| **交易** | 权益/保证金率/回撤/当日盈亏 KPI + 资产构成、可用余额、24h 行情条（涨跌幅）、持仓表、信号流（含时间戳）、订单流、**权益曲线图**、**K线蜡烛图（含平仓标记）**、**平仓明细+绩效统计（胜率/盈亏比/净盈亏/手续费）**、模块心跳、控制按钮（危险操作需二次确认）、**风控参数面板（setparam 热更新）**、**浏览器告警通知开关**（保证金率>60%/回撤>10%/订单错误，🔕 按钮授权） |
+| **运维** | 历史窗口 1h/6h/24h/7d：K线闭合+订单失败、时间偏移（含均值/最大统计）、**WS 连接数趋势**、**资金费成本**、RSS、**CPU+错误增量**、模块心跳秒龄、代理池、网络监控、**告警历史**（钉钉/看门狗告警自动归档）、**进程启动/停止历史**、运维事件时间线、日志体积 |
+
+运维历史数据归档在 `data/ops_history.db`（heartbeat/command/position/alert/lifecycle 流 → SQLite，
+默认保留 7 天，`OPS_HISTORY_DAYS` 可调）；RSS/CPU/错误历史来自
+`logs/soak_metrics.csv`（soak_watchdog 每小时写入，自动解析 runner PID）。
+
+运维 API：`/api/ops/summary` `/api/ops/history?hours=` `/api/ops/commands` `/api/ops/soak`
+`/api/ops/equity` `/api/ops/trades` `/api/ops/alerts` `/api/ops/restarts` `/api/kline` `/metrics`。
+
+K线蜡烛图数据来自 `KLINE_ARCHIVE=1` 的归档（data/kline.db），未开启时图为空。
 
 ## 维护操作
 
@@ -286,7 +316,7 @@ python tools/proxy_watchdog.py --threshold-ms 5000 --consecutive 3 --interval 30
 
 - **症状**: 日志 `STALL BREAKER ... 触发熔断停单` 或 `EMERGENCY STOP — 停止下单`；后续信号被拒（`Circuit breaker active`）
 - **检测方式**: `grep -E "STALL BREAKER|EMERGENCY STOP|Circuit breaker" logs/systrader.log`
-- **影响**: 停止新单 + 撤销全部活跃订单（含持仓的 SL/TP 保护单）；**持仓保留但失去保护**
+- **影响**: 停止新单 + 撤销活跃入场单（**持仓的 SL/TP 保护单保留**，2026-08-16 起不再撤保护单）；持仓继续受保护
 - **处理步骤**:
   1. 确认根因: stall 熔断 → 行情/网络问题（按 #2/#3 处理）；kill switch → 人工触发（确认意图）
   2. 修复根因后，人工确认持仓与余额（`curl http://localhost:8000/health` 或对账日志）
@@ -306,3 +336,41 @@ python tools/proxy_watchdog.py --threshold-ms 5000 --consecutive 3 --interval 30
 | `python -m shared.runner` | `--pending-timeout-minutes` | 30 | PENDING 订单超时自动撤单阈值，分钟（0=禁用） |
 | `python tools/heartbeat_watchdog.py` | `--closes-stall-minutes` | 15 | kline_closes 无增长告警阈值，分钟 |
 | `python tools/heartbeat_watchdog.py` | `--fail-rate-threshold` | 0.10 | 订单失败率告警阈值 |
+| 环境变量 | `MAX_LEVERAGE` | 5 | 全局杠杆上限（风控链 LeverageController，超出拒绝下单） |
+| 环境变量 | `USER_DATA_STREAM` | 1 | User Data Stream 成交/余额推送（0=降级为 10s 轮询） |
+| 环境变量 | `FUNDING_MONITOR` / `FUNDING_COST_THRESHOLD` | 1 / 1.0 | 资金费监控开关 / 8h 成本告警阈值 (USDT) |
+| 环境变量 | `POST_ONLY` | 0 | 入场单走 LIMIT_MAKER（maker 费率 0.02%） |
+| 环境变量 | `MAX_ENTRY_DEVIATION` | 0.005 | 下单前价格保护: 信号价与现价最大偏差 |
+| 环境变量 | `DB_PATH` / `DB_RETENTION_DAYS` | data/trades.db / 90 | 订单持久化 / 保留天数 |
+| 环境变量 | `KLINE_ARCHIVE` | 0 | 闭合 K 线归档到 data/kline.db |
+| 环境变量 | `ORDERBOOK_CHECK` / `MAX_SLIPPAGE_BPS` | 0 / 10 | 深度滑点预检开关 / 阈值 (bps) |
+
+### 账户配置自动同步（2026-08-16 起）
+
+启动时 runner 自动：① 校验持仓模式（双向持仓会 ERROR 提示，系统按单向设计）；
+② 按策略杠杆 `change_leverage` 设置每个 symbol；③ 保证金模式设为 ISOLATED。
+不再依赖账户默认杠杆。
+
+### 远程控制（Telegram / Dashboard）
+
+```bash
+# Telegram 机器人 (长轮询, 与 dashboard 共用 command 流)
+python tools/telegram_bot.py
+```
+
+| 命令 | 作用 |
+|------|------|
+| `/status` `/positions` | 运行统计 / 持仓 |
+| `/pause` `/resume` `/stop` | 暂停新信号 / 恢复 / 熔断（撤入场单保留保护单） |
+| `/forceexit SYM\|ALL` | 手动市价平仓（撤该 symbol 保护单 + reduceOnly 市价 + 同步本地） |
+| `/cancelall SYM\|ALL` | 清场撤单（**含保护单**，仅人工确认后使用） |
+
+Dashboard Controls 已加 Force Exit / Cancel All（SYMBOL 输入框，空=ALL）。
+`/metrics` 端点导出 MetricsCollector 快照（心跳年龄/计数器/gauges）。
+
+### 停滞熔断判定（2026-08-16 起）
+
+熔断依据**每 symbol 最后行情消息时间戳**（`feed.get_last_update_ts`）判断，
+不再看缓存价格——缓存价收到过一次就永不为 None，旧实现会使熔断形同虚设。
+PAPER 模式的止损/止盈条件单由主循环每 5s 轮询模拟触发（`poll_paper_conditionals`），
+模拟持仓同样有保护，shadow 交易统计可信。

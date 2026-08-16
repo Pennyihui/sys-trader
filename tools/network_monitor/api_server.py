@@ -17,7 +17,7 @@ class NetworkAPIHandler(BaseHTTPRequestHandler):
     def _send_json(self, data: dict, status: int = 200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # 2026-08-16 审计: 移除 CORS *, 防任意网页跨域读取本机服务数据
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 

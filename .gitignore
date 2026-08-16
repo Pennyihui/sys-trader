@@ -1,11 +1,45 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+.pytest-tmp/
 config/.env
-config/.env.local
+config/.env*
+!config/.env.example
 node_modules/
+
+# 构建产物 / 本地缓存
+dashboard/frontend/dist/
+*.tsbuildinfo
+
+# 运行产物（日志/数据/本地状态）
+logs/
+data/
+*.zip
+.codegraph/
+
+# 个人 AI 工具配置（含 API token 与 vendored 技能库, 不入库）
+.claude/
+.opencode/
+.superpowers/
 
 # proxy pool: 含代理凭据的运行文件（mihomo.yaml 有全部节点密码）
 tools/proxy_pool/mihomo.yaml
+tools/proxy_pool/proxy_pool.json
+tools/proxy_pool/nssm.exe
+tools/proxy_pool/nssm-2.24.zip
+tools/proxy_pool/*.mmdb
+tools/proxy_pool/*.dat
+tools/proxy_pool/cache.db
+tools/proxy_pool/core.log
+tools/proxy_pool/service.err
+tools/proxy_pool/service.log
 tools/proxy_pool/data/
 tools/proxy_pool/cache/
 tools/proxy_pool/logs/
+tools/proxy_pool/_*.yaml
+tools/proxy_pool/_*.json
+
+# network monitor: 运行产物
+tools/network_monitor/*.jsonl
+tools/network_monitor/*.log
+tools/network_monitor/*.err

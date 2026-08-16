@@ -17,21 +17,36 @@ class StartupReconciler:
         self.portfolio = portfolio
 
     def reconcile(self) -> Dict:
-        """获取交易所持仓并与本地比对，返回差异报告（存在性 + 数量）。"""
+        """获取交易所持仓并与本地比对，返回差异报告（存在性 + 数量 + 方向）。
+
+        2026-08-16 审计: 与 PositionReconciler 统一——远端 positionAmt 做空为负,
+        先比方向再比数量绝对值, 消除做空恒误报。
+        """
         remote = self._fetch_remote_positions()
+        if remote is None:
+            # 账户不可达: 跳过, 不把"拉取失败"误判成"本地持仓全部多余"
+            logger.warning("StartupReconciler: 账户不可达, 跳过启动对账")
+            return {"remote_only": [], "local_only": [], "qty_mismatch": [],
+                    "matched": [], "skipped": True}
         # 快照: 运行中 positions 可能被 feed 线程修改, 避免并发改 dict
-        local = {s: p.quantity for s, p in list(self.portfolio.positions.items())}
+        local = {s: p for s, p in list(self.portfolio.positions.items())}
 
         diff = {"remote_only": [], "local_only": [], "qty_mismatch": [], "matched": []}
-        for symbol, qty in remote.items():
+        for symbol, rp in remote.items():
+            r_qty = float(rp["qty"])
             if symbol in local:
-                if abs(qty - local[symbol]) > 0.0001:
+                lp = local[symbol]
+                r_dir = "LONG" if r_qty > 0 else "SHORT"
+                if r_dir != lp.direction or abs(abs(r_qty) - lp.quantity) > 0.0001:
                     diff["qty_mismatch"].append(
-                        {"symbol": symbol, "local": local[symbol], "remote": qty})
+                        {"symbol": symbol, "local": lp.quantity,
+                         "local_direction": lp.direction,
+                         "remote": abs(r_qty), "remote_direction": r_dir})
                 else:
                     diff["matched"].append(symbol)
             else:
-                diff["remote_only"].append(symbol)
+                diff["remote_only"].append(
+                    {"symbol": symbol, "qty": r_qty, "entry": rp["entry"]})
         for symbol in local:
             if symbol not in remote:
                 diff["local_only"].append(symbol)
@@ -43,17 +58,27 @@ class StartupReconciler:
 
         return diff
 
-    def _fetch_remote_positions(self) -> Dict[str, float]:
-        """从交易所获取当前持仓。"""
+    def _fetch_remote_positions(self) -> Optional[Dict[str, dict]]:
+        """从交易所获取当前持仓 (symbol → {qty: 带符号, entry: 开仓均价})。
+
+        失败/响应无效返回 None (调用方跳过对账), 而非空 dict——
+        空 dict 会被误读成"交易所无持仓"。
+        """
         try:
             account = self.gateway.get_account()
-            positions = account.get("positions", [])
+            if not isinstance(account, dict) or account.get("error") \
+                    or "positions" not in account:
+                logger.error("StartupReconciler: 账户响应无效: %.120s", str(account))
+                return None
             result = {}
-            for p in positions:
+            for p in account.get("positions", []):
                 amt = float(p.get("positionAmt", 0))
                 if abs(amt) > 0.0001:
-                    result[p["symbol"]] = amt
+                    result[p["symbol"]] = {
+                        "qty": amt,
+                        "entry": float(p.get("entryPrice", 0) or 0),
+                    }
             return result
         except Exception as e:
             logger.error("Failed to fetch remote positions: %s", e)
-            return {}
+            return None

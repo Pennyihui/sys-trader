@@ -41,6 +41,15 @@ class HeartbeatPublisher:
             "orders_placed": m.get_gauge("orders_placed"),
             "orders_failed": m.get_gauge("orders_failed"),
             "server_time_offset": m.get_gauge("server_time_offset"),
+            # 面板二期 (2026-08-16): WS 连接数 / 资金费成本 / 风控参数
+            "ws_connected": m.get_gauge("ws_connected"),
+            "ws_total": m.get_gauge("ws_total"),
+            "funding_cost": m.get_gauge("funding_cost"),
+            "risk_per_trade": m.get_gauge("risk_per_trade"),
+            "max_leverage": m.get_gauge("max_leverage"),
+            # 风控补强 (2026-08-16 #3/#4): 单日交易上限 / 止损距离上限
+            "max_trades_day": m.get_gauge("max_trades_day"),
+            "max_stop_pct": m.get_gauge("max_stop_pct"),
         }
         self.event_bus.publish("heartbeat", {
             "instance": self.instance, "modules": modules, "stats": stats,

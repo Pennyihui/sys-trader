@@ -53,12 +53,14 @@ class MarketDataFeed:
         proxy_port: int = 7897,
         redundant_connections: int = 4,
         proxy_ports: Optional[List[int]] = None,
+        archive=None,  # KlineArchive 可选注入 (P2-1 闭合 K 线持久化)
     ):
         self.symbols = symbols
         self.testnet = testnet
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
         self.redundant_connections = redundant_connections
+        self.archive = archive
         # 每条连接独立端口（按订阅源隔离）；缺省时都用 proxy_port
         self.proxy_ports = proxy_ports or [proxy_port] * redundant_connections
         self.buffer = KlineBuffer(max_size=500)
@@ -67,6 +69,10 @@ class MarketDataFeed:
         )
         self._mark_prices: Dict[str, float] = {}
         self._last_prices: Dict[str, float] = {}
+        # 每 symbol 最后一次行情更新时间（停滞检测用）。
+        # 注意: get_last_price 返回缓存价永不为 None，不能作为新鲜度依据——
+        # 数据源死亡后缓存价仍在，必须用时间戳判断（2026-08-16 审计修复）。
+        self._last_update_ts: Dict[str, float] = {}
         self._running = False
         self._stop = threading.Event()
         self._conns: List[_ConnState] = []
@@ -108,29 +114,26 @@ class MarketDataFeed:
         mapping = {"1w": "1w", "1d": "1d", "4h": "4h", "1h": "1h"}
         return mapping.get(interval, interval)
 
-    @staticmethod
-    def _stream_timeframe_map(symbols: List[str]) -> Dict[str, str]:
-        m = {}
-        for sym in symbols:
-            s = sym.lower()
-            m[f"{s}@kline_4h"] = "4h"
-            m[f"{s}@kline_1d"] = "1d"
-            m[f"{s}@kline_1w"] = "1w"
-        return m
-
     # ─── 消息处理 ───
 
     def _on_message(self, raw: str, notify_closed: bool = True):
-        """combined stream 回调入口。notify_closed 仅主连接为 True。"""
-        data = json.loads(raw)
-        inner = data.get("data", data)
-        event = inner.get("e", "")
-        if event == "kline":
-            self._on_kline_message(inner, notify_closed=notify_closed)
-        elif event == "markPriceUpdate":
-            self._on_mark_price_message(inner)
-        elif event == "aggTrade":
-            self._on_agg_trade_message(inner)
+        """combined stream 回调入口。notify_closed 仅主连接为 True。
+
+        2026-08-16 审计: 整体 try/except — json 畸形帧/字段缺失不再把异常
+        冒泡出 on_message 杀死连接循环 (此前会引发 8 路重连风暴)。
+        """
+        try:
+            data = json.loads(raw)
+            inner = data.get("data", data)
+            event = inner.get("e", "")
+            if event == "kline":
+                self._on_kline_message(inner, notify_closed=notify_closed)
+            elif event == "markPriceUpdate":
+                self._on_mark_price_message(inner)
+            elif event == "aggTrade":
+                self._on_agg_trade_message(inner)
+        except Exception as e:
+            logger.error("Feed message parse failed: %s (raw=%.120s)", e, raw)
 
     def _on_message_wrapper(self, conn_id: int, raw: str):
         """消息分发：所有连接都处理 kline/markPrice/aggTrade 写入共享 buffer 与
@@ -164,7 +167,19 @@ class MarketDataFeed:
             volume=float(k.get("v", 0)),
             is_closed=k.get("x", False),
         )
-        self.buffer.add(kline)
+        added = self.buffer.add(kline)
+        if not added:
+            # 乱序/过期 K 线被丢弃: 不触发闭合回调（该窗口数据不可靠）
+            logger.debug(
+                "Dropped out-of-order kline %s %s open_time=%s",
+                symbol, timeframe, kline.open_time,
+            )
+            return
+
+        # 闭合 K 线持久化归档 (P2-1), 失败静默 (观测增强, 不阻塞行情)。
+        # 仅主连接归档 (2026-08-16 审计: 此前 8 条连接各自 upsert+commit, 8× 写放大)
+        if kline.is_closed and self.archive is not None and notify_closed:
+            self.archive.upsert(kline)
 
         if notify_closed and kline.is_closed:
             key = (symbol, timeframe, kline.open_time)
@@ -182,11 +197,13 @@ class MarketDataFeed:
         symbol = msg.get("s", "").upper()
         price = float(msg.get("p", 0))
         self._mark_prices[symbol] = price
+        self._last_update_ts[symbol] = time.time()
 
     def _on_agg_trade_message(self, msg: dict):
         symbol = msg.get("s", "").upper()
         price = float(msg.get("p", 0))
         self._last_prices[symbol] = price
+        self._last_update_ts[symbol] = time.time()
 
     # ─── 连接状态回调 ───
 
@@ -221,6 +238,44 @@ class MarketDataFeed:
     def get_last_price(self, symbol: str) -> Optional[float]:
         return self._last_prices.get(symbol.upper())
 
+    def get_last_update_ts(self, symbol: str) -> Optional[float]:
+        """该 symbol 最后一次行情消息的本地时间（epoch 秒），无数据时 None。
+
+        供停滞检测使用：缓存价永不为 None，只有时间戳能反映数据流是否存活。
+        """
+        return self._last_update_ts.get(symbol.upper())
+
+    _PERIOD_MS = {"1w": 604_800_000, "1d": 86_400_000, "4h": 14_400_000,
+                  "1h": 3_600_000, "15m": 900_000}
+
+    def _replay_missed_closures(self):
+        """主连接切换后补发窗口期内漏通知的闭合 K 线 (2026-08-16 审计修复)。
+
+        主断→切换窗口 (最坏 ping_timeout 30s) 内备用连接已把闭合 candle 写入
+        buffer 但 _closed_notified 未记录; 交易所不重发 → 回调永久丢失。
+        只补发最近 2 根周期内的闭合线, 避免把 backfill 的历史线全部重放。
+        """
+        try:
+            now_ms = int(time.time() * 1000)
+            for key, klines in self.buffer.all_entries().items():
+                for k in klines:
+                    if not k.is_closed:
+                        continue
+                    period = self._PERIOD_MS.get(k.timeframe, 900_000)
+                    if now_ms - k.open_time > 2 * period:
+                        continue
+                    ck = (k.symbol, k.timeframe, k.open_time)
+                    with self._lock:
+                        if ck in self._closed_notified:
+                            continue
+                        self._closed_notified[ck] = None
+                    logger.warning("REPLAY missed closed kline %s %s open_time=%s",
+                                   k.symbol, k.timeframe, k.open_time)
+                    ohlcv = self.buffer.get_klines(k.symbol, k.timeframe, limit=100)
+                    self.on_kline_closed(k.symbol, k.timeframe, ohlcv)
+        except Exception as e:
+            logger.error("Replay missed closures failed: %s", e)
+
     # ─── 主连接切换 ───
 
     def _try_switch_primary(self, failed_idx: int):
@@ -229,6 +284,7 @@ class MarketDataFeed:
         备用连接一直在把消息写入共享 buffer/价格缓存，
         因此切换后数据已就绪，无需额外回填，无缝衔接。
         """
+        switched = False
         with self._lock:
             if failed_idx != self._primary_idx:
                 return  # 已经不是主连接了，忽略
@@ -241,11 +297,18 @@ class MarketDataFeed:
                         "Switched primary: conn %d -> conn %d",
                         failed_idx, idx,
                     )
-                    return
-            logger.warning(
-                "No available standby for conn %d (all %d down)",
-                failed_idx, self.redundant_connections,
-            )
+                    switched = True
+                    break
+            if not switched:
+                logger.warning(
+                    "No available standby for conn %d (all %d down)",
+                    failed_idx, self.redundant_connections,
+                )
+        # 2026-08-16 修复: 补发逻辑必须在锁外调用 — self._lock 是非重入锁,
+        # 此前在 with 块内调用 _replay_missed_closures (其内部又获取同锁)
+        # 造成死锁, 卡死后所有连接的 K 线闭合处理永久阻塞 (closes=0)。
+        if switched:
+            self._replay_missed_closures()
 
     # ─── 历史数据回填 ───
 
@@ -353,6 +416,12 @@ class MarketDataFeed:
                     # 约束: ping_interval 必须 > ping_timeout（websocket-client 强制）。
                     ping_interval=60,
                     ping_timeout=30,
+                    # 2026-08-16 修复: 部分代理端口连接会悬挂 (TCP 通但节点卡),
+                    # 无代理超时则 run_forever 永不返回 → 该连接线程卡死、
+                    # 主备切换被跳过 (曾致 ws=3/8 但 closes=0 持续 10h)。
+                    # 注意 websocket-client 1.8 的 run_forever 用
+                    # http_proxy_timeout 而非 connect_timeout。
+                    http_proxy_timeout=20,
                 )
             except Exception as e:
                 logger.error("Conn %d exception: %s", conn_id, e)
