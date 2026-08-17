@@ -612,3 +612,20 @@ runner 重启后生效（不影响交易正确性, 面板显示"—"直到下次
 - **严重度**: 🟢 低
 - **症状**: 24h 结束后 report() 打 "结论: ✅ 稳定" 时 UnicodeEncodeError (gbk 无法编码 \u2705)。
 - **修复**: 结论行改 ASCII (PASS/FAIL)。
+
+### BUG-039 修订 (2026-08-17 22:00): 真根因 = testnet kline stream 断推, 非主连接
+
+- **实证**: 独立 WS 诊断脚本 12s 内收到 33 条 aggTrade、0 条 kline — testnet kline_15m stream
+  从 8/17 10:45 起停止推送 (直到 22:00 仍断, REST 兜底日志证实)。
+- **主连接看护 (primary_stale_seconds/force_primary_switch) 保留为辅助防线** — 它只防
+  "主连接半开断流", 救不了 kline 流整体断推 (主连接一直在收 aggTrade, stale 检测不触发)。
+- **根治 = feed.poll_closures_from_rest**: 15m 边界后 ≥60s 拉 /fapi/v1/klines 补触发闭合回调
+  (幂等 _closed_notified + 5min 节流 + 只补 2 周期内)。22:00 进程启动 1 分钟即补触发 21:45
+  闭合 (closes=3), 22:16 又补 22:00 (closes=6) — WS 断推期间闭合链路经 REST 持续工作。
+- **教训**: WS 冗余只覆盖连接层; kline 闭合必须有 REST 兜底 (WS 断推时数据完整性靠 REST 保证)。
+
+### BUG-040 修订 (2026-08-17 22:00): 校时限幅 5s→2s
+
+- 实测 RTT=8279ms 时 (t0+t1)/2 剔除延迟后仍残留 4050ms 假偏移 (代理延迟不对称),
+  5s 限幅拦不住 → 仍会 -1022。收紧到 2s: 本机 NTP 正常时真实偏移 <1s, >2s 一律视为污染。
+- 22:00 进程实测: "Server time offset 2050ms 异常 (RTT=4250ms) → 保留旧偏移" ✓
