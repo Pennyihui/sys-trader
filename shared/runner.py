@@ -1638,6 +1638,13 @@ class SystemRunner:
                         self._sync_position_risks()
                     except Exception as e:
                         logger.error("持仓风险同步失败: %s", e)
+                    # K线闭合 REST 兜底 (2026-08-17): WS kline 流停滞自愈,
+                    # 防 testnet kline stream 断推 11h 的静默失明重演
+                    try:
+                        if self.feed is not None:
+                            self.feed.poll_closures_from_rest()
+                    except Exception as e:
+                        logger.debug("K线闭合 REST 兜底失败: %s", e)
                     last_equity_check = time.time()
                 # 精确资金费对账 (2026-08-16 #6): 10min 周期拉 income 流水
                 try:

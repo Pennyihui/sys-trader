@@ -147,8 +147,9 @@ class OrderGateway:
                 t1 = int(time.time() * 1000)
                 # 用往返中值估计服务器时间, 剔除网络延迟 (对称延迟假设)
                 offset = int(server) - (t0 + t1) // 2
-                # 超限幅: 真实时钟偏移不可能 > 5s, 超限说明校时被代理延迟污染
-                if abs(offset) > 5000:
+                # 超限幅: 真实时钟偏移 (本机 NTP 正常) 应 < 1s, >2s 说明
+                # 校时被代理延迟污染 (实测 RTT 8s 时可残留 4s 假偏移)
+                if abs(offset) > 2000:
                     logger.warning(
                         "Server time offset %dms 异常 (RTT=%dms) — 保留旧偏移 %dms",
                         offset, t1 - t0, self._time_offset,

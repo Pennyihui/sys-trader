@@ -84,6 +84,8 @@ class MarketDataFeed:
         self._closed_notified: "OrderedDict" = OrderedDict()
         self._notified_max = 5000
         self._stream_url = self._build_stream_url()
+        # K线闭合 REST 兜底节流: symbol -> 上次 REST 拉取时间 (2026-08-17)
+        self._last_closure_poll: Dict[str, float] = {}
 
     # ─── Stream URL ───
 
@@ -391,6 +393,73 @@ class MarketDataFeed:
                     logger.info("Backfilled %s %s: %d klines", symbol, tf, len(data))
                 except Exception as e:
                     logger.error("Backfill failed %s %s: %s", symbol, tf, e)
+
+    def poll_closures_from_rest(self):
+        """K线闭合 REST 兜底 (2026-08-17): WS kline 流停滞时补触发闭合回调。
+
+        背景: testnet kline stream 曾连续 11h 停止推送 (aggTrade/markPrice
+        正常 → ws=8/8、价格正常、stalls=0 全绿, 唯独 closes 不动, 信号链
+        静默失明)。watchdog 只告警不处理 — 需要自愈。
+
+        策略: 15m 边界后 ≥60s 用 /fapi/v1/klines 拉最新已闭合 K线,
+        若 _closed_notified 未记录则补触发 on_kline_closed (幂等)。
+        节流: 每 symbol 每 5 分钟最多拉一次; 只补最近 2 根周期内的闭合
+        (防重放历史); 距边界 <60s 跳过 (WS 大概率正常)。
+        """
+        import requests
+
+        if not self.symbols:
+            return
+        base_url = ("https://testnet.binancefuture.com/fapi/v1/klines" if self.testnet
+                    else "https://fapi.binance.com/fapi/v1/klines")
+        proxies = {"http": f"http://{self.proxy_host}:{self.proxy_port}",
+                   "https": f"http://{self.proxy_host}:{self.proxy_port}"}
+        now_ms = int(time.time() * 1000)
+        period = self._PERIOD_MS.get("15m", 900_000)
+        if now_ms % period < 60_000:
+            return  # 距 15m 边界 <60s: WS 大概率正常, 不打扰
+        for symbol in self.symbols:
+            last_poll = self._last_closure_poll.get(symbol, 0.0)
+            if now_ms - last_poll < 300_000:
+                continue  # 每 symbol 5 分钟节流
+            self._last_closure_poll[symbol] = now_ms
+            try:
+                resp = requests.get(
+                    base_url,
+                    params={"symbol": symbol, "interval": "15m", "limit": 2},
+                    proxies=proxies, timeout=10,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.debug("Closure poll %s failed: %s", symbol, e)
+                continue
+            if len(data) < 2:
+                continue
+            row = data[-2]  # 倒数第二根 = 已闭合
+            kline = Kline(
+                symbol=symbol, timeframe="15m",
+                open_time=row[0], close_time=row[6],
+                open=float(row[1]), high=float(row[2]),
+                low=float(row[3]), close=float(row[4]),
+                volume=float(row[5]), is_closed=True,
+            )
+            if now_ms - kline.open_time > 2 * period:
+                continue  # 过期闭合 (历史重放), 跳过
+            key = (symbol, "15m", kline.open_time)
+            with self._lock:
+                if key in self._closed_notified:
+                    continue
+                self._closed_notified[key] = None
+                self._closed_notified.move_to_end(key)
+                if len(self._closed_notified) > self._notified_max:
+                    self._closed_notified.popitem(last=False)
+            self.buffer.add(kline)
+            logger.warning(
+                "CLOSURE REST FALLBACK: %s 15m open_time=%s 已补触发 "
+                "(WS kline 流可能停滞)", symbol, kline.open_time)
+            ohlcv = self.buffer.get_klines(symbol, "15m", limit=100)
+            self.on_kline_closed(symbol, "15m", ohlcv)
 
     # ─── 生命周期 ───
 

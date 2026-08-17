@@ -50,6 +50,70 @@ class TestPrimaryStale:
         assert called == [0]
 
 
+class TestClosureRestFallback:
+    """K线闭合 REST 兜底 (2026-08-17): WS kline 流停滞时补触发闭合回调。"""
+
+    def test_polls_and_triggers_missing_closure(self, monkeypatch):
+        feed = _feed_with_conns()
+        triggered = []
+        feed.on_kline_closed = lambda s, tf, ohlcv: triggered.append((s, tf))
+        import time as _t
+        now = _t.time()
+        # 对齐到 15m 边界 +300s (取整秒消除浮点尾差, 否则 *1000 后可能 <60000)
+        aligned = float(int(now - (now % 900))) + 300.0
+        monkeypatch.setattr("time.time", lambda: aligned)
+        aligned_ms = int(aligned * 1000)
+        # REST 返回 [已闭合(上一周期), 当前 forming] — open_time 贴近真实边界
+        closed_open = aligned_ms - 900000
+        closed_row = [closed_open, 90, 91, 92, 95, 500, aligned_ms - 10]
+        forming_row = [aligned_ms, 100, 101, 102, 103, 1000, aligned_ms + 899000]
+        monkeypatch.setattr("requests.get",
+                            lambda *a, **k: _FakeKlineResp([closed_row, forming_row]))
+        feed.poll_closures_from_rest()
+        assert len(triggered) == 1
+        assert triggered[0][0] == "BTCUSDT"
+        assert triggered[0][1] == "15m"
+        # 幂等: 已通知的 key 不再重复触发 (节流也拦截, 双保险)
+        feed.poll_closures_from_rest()
+        assert len(triggered) == 1
+
+    def test_skips_when_far_from_boundary(self, monkeypatch):
+        feed = _feed_with_conns()
+        triggered = []
+        feed.on_kline_closed = lambda s, tf, ohlcv: triggered.append(s)
+        import time as _t
+        now = _t.time()
+        aligned = now - (now % 900) + 10  # 边界 +10s < 60s → 跳过
+        monkeypatch.setattr("time.time", lambda: aligned)
+        monkeypatch.setattr("requests.get", lambda *a, **k: _FakeKlineResp([]))
+        feed.poll_closures_from_rest()
+        assert triggered == []
+
+    def test_throttles_per_symbol(self, monkeypatch):
+        feed = _feed_with_conns()
+        calls = []
+        monkeypatch.setattr("requests.get", lambda *a, **k: (
+            calls.append(k.get("params")) or _FakeKlineResp([])))
+        import time as _t
+        now = _t.time()
+        aligned = float(int(now - (now % 900))) + 300.0
+        monkeypatch.setattr("time.time", lambda: aligned)
+        feed.poll_closures_from_rest()
+        feed.poll_closures_from_rest()
+        assert len(calls) == 1  # 5 分钟节流
+
+
+class _FakeKlineResp:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._rows
+
+
 class TestTimeSyncFix:
     """-1022 根因修复: 校时往返延迟剔除 + 超限幅 (2026-08-17)。
 
@@ -79,12 +143,27 @@ class TestTimeSyncFix:
 
         class _Resp:
             def json(self):
-                return {"serverTime": int(base[0] + 8000)}  # 8s 假偏移
+                return {"serverTime": int(base[0] + 3000)}  # 3s 假偏移 (>2s 限幅)
 
         monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
         monkeypatch.setattr(gw, "_record_offset", lambda *a: None)
         gw._sync_server_time()
         assert gw._time_offset == 123  # 限幅: 保留旧值
+
+    def test_moderate_offset_within_clamp_updates(self, monkeypatch):
+        from execution.order_gateway import OrderGateway
+        gw = OrderGateway(testnet=True)
+        gw._time_offset = 123
+        base = [time.time() * 1000]
+
+        class _Resp:
+            def json(self):
+                return {"serverTime": int(base[0] + 1500)}  # 1.5s < 2s 限幅
+
+        monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
+        monkeypatch.setattr(gw, "_record_offset", lambda *a: None)
+        gw._sync_server_time()
+        assert 1000 <= gw._time_offset <= 2000  # 更新为新偏移
 
     def test_failure_keeps_last_offset(self, monkeypatch):
         from execution.order_gateway import OrderGateway
