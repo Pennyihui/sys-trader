@@ -10,6 +10,13 @@ from dashboard.ops_archive import OpsArchive
 from shared.event_bus import Event
 
 
+def _now_ts(offset_sec: int = 0) -> str:
+    """动态 UTC 时间戳 — 固定时间戳会随时间漂移掉出 history(hours=24) 窗口
+    (2026-08-17 修复: 8/16 写的时间戳到 8/17 后查询为空, 造成 flaky)。"""
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_sec)).isoformat()
+
+
 @pytest.fixture
 def archive(tmp_path):
     a = OpsArchive(db_path=str(tmp_path / "ops.db"), retention_days=7)
@@ -24,7 +31,7 @@ def _hb_event(ts: float, closes=10, placed=1, failed=0, offset=500, modules=None
               "stats": {"kline_closes": closes, "orders_placed": placed,
                         "orders_failed": failed, "server_time_offset": offset},
               "modules": modules or {"runner": 1.0, "market_data": 2.0}},
-        timestamp="2026-08-16T00:00:00+00:00",
+        timestamp=_now_ts(),
     )
 
 
@@ -36,7 +43,7 @@ class TestOpsArchive:
             "stats": {"kline_closes": 42, "orders_placed": 3, "orders_failed": 0,
                       "server_time_offset": 800},
             "modules": {"runner": 1.0},
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         latest = archive.latest()
         assert latest is not None
         assert latest["kline_closes"] == 42
@@ -49,7 +56,7 @@ class TestOpsArchive:
     def test_command_archived(self, archive):
         archive.on_command(Event(stream="command", data={
             "command": "emergency_stop", "symbol": "", "source": "dashboard",
-        }, timestamp="2026-08-16T00:01:00+00:00"))
+        }, timestamp=_now_ts(60)))
         cmds = archive.commands()
         assert len(cmds) == 1
         assert cmds[0]["command"] == "emergency_stop"
@@ -58,7 +65,7 @@ class TestOpsArchive:
         old_ts = time.time() - 8 * 86400  # 8 天前
         archive.on_heartbeat(Event(stream="heartbeat", data={
             "instance": "live", "stats": {"kline_closes": 1}, "modules": {},
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         # 直接改 ts 模拟旧数据 (event timestamp 解析失败会回退 now, 无法注入旧值)
         archive.conn.execute(
             "UPDATE heartbeat_history SET ts=?", (old_ts,))
@@ -70,11 +77,11 @@ class TestOpsArchive:
         ev1 = Event(stream="heartbeat", data={"instance": "live",
                                               "stats": {"kline_closes": 1},
                                               "modules": {}},
-                    timestamp="2026-08-16T00:00:00+00:00")
+                    timestamp=_now_ts())
         ev2 = Event(stream="heartbeat", data={"instance": "live",
                                               "stats": {"kline_closes": 9},
                                               "modules": {}},
-                    timestamp="2026-08-16T00:00:00+00:00")
+                    timestamp=_now_ts())
         archive.on_heartbeat(ev1)
         archive.on_heartbeat(ev2)
         assert archive.latest()["kline_closes"] == 9  # 同 ts 覆盖
@@ -86,12 +93,12 @@ class TestOpsArchive:
             "event": "equity", "instance": "live", "total_equity": 10000.0,
             "available_balance": 9000.0, "margin_ratio": 0.1,
             "daily_pnl": 5.0, "drawdown": 0.01,
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         archive.on_position(Event(stream="position.changed", data={
             "event": "close", "instance": "live", "symbol": "BTCUSDT",
             "direction": "LONG", "entry_price": 60000.0, "exit_price": 61000.0,
             "quantity": 0.1, "gross_pnl": 100.0, "fee": 1.2, "realized_pnl": 98.8,
-        }, timestamp="2026-08-16T00:01:00+00:00"))
+        }, timestamp=_now_ts(60)))
         eq = archive.equity(hours=24)
         assert len(eq) == 1 and eq[0]["total_equity"] == 10000.0
         trades = archive.trades()
@@ -102,10 +109,10 @@ class TestOpsArchive:
     def test_alert_and_lifecycle_archived(self, archive):
         archive.on_alert(Event(stream="alert", data={
             "source": "dingtalk", "message": "心跳停滞告警",
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         archive.on_lifecycle(Event(stream="lifecycle", data={
             "event": "started", "pid": 1234, "instance": "live",
-        }, timestamp="2026-08-16T00:00:10+00:00"))
+        }, timestamp=_now_ts(10)))
         alerts = archive.alerts()
         assert len(alerts) == 1 and "心跳停滞" in alerts[0]["message"]
         restarts = archive.restarts()
@@ -129,7 +136,7 @@ class TestOpsRoutes:
             "stats": {"kline_closes": 5, "orders_placed": 1, "orders_failed": 0,
                       "server_time_offset": 300},
             "modules": {"runner": 2.0},
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         from fastapi.testclient import TestClient
         client = TestClient(self._app(archive))
         resp = client.get("/api/ops/summary")
@@ -145,10 +152,10 @@ class TestOpsRoutes:
             "stats": {"kline_closes": 7, "orders_placed": 2, "orders_failed": 1,
                       "server_time_offset": 100},
             "modules": {},
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         archive.on_command(Event(stream="command", data={
             "command": "pause", "symbol": "", "source": "telegram",
-        }, timestamp="2026-08-16T00:02:00+00:00"))
+        }, timestamp=_now_ts(120)))
         from fastapi.testclient import TestClient
         client = TestClient(self._app(archive))
         hist = client.get("/api/ops/history?hours=24").json()
@@ -187,7 +194,7 @@ class TestOpsRoutes:
             "event": "equity", "instance": "live", "total_equity": 9999.0,
             "available_balance": 8000.0, "margin_ratio": 0.2,
             "daily_pnl": 0.0, "drawdown": 0.0,
-        }, timestamp="2026-08-16T00:00:00+00:00"))
+        }, timestamp=_now_ts()))
         from fastapi.testclient import TestClient
         from dashboard.server import create_app
         app = create_app(data_collector=MagicMock(collect=MagicMock(return_value={})),

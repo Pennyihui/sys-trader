@@ -130,17 +130,34 @@ class OrderGateway:
         失败时保留上一次成功的偏移量（而非归零）——代理抖动导致"问时间"
         超时是常态，归零等于丢弃之前的校准结果，反而在抖动期间失去保护。
         timeout 放宽到 15s，容忍代理延迟尖峰。
+
+        2026-08-17 修复: 往返延迟剔除 + 超限幅。
+        旧实现 now 取在请求前，代理尖峰时 RTT 达 8s，整个 RTT 被误算成
+        时钟偏移 (offset=8s) → 签名时间戳失真 → 后续请求批量 -1022
+        "Signature not valid" (24h 实测: get_account/positionRisk/income
+        在尖峰窗口反复 -1022, 对账/风险同步静默失明)。
         """
         try:
-            now = int(time.time() * 1000)
+            t0 = int(time.time() * 1000)
             resp = requests.get(
                 f"{self.base_url}/fapi/v1/time", timeout=15, proxies=self.proxies
             )
             server = resp.json().get("serverTime")
             if server:
-                self._time_offset = int(server) - now
+                t1 = int(time.time() * 1000)
+                # 用往返中值估计服务器时间, 剔除网络延迟 (对称延迟假设)
+                offset = int(server) - (t0 + t1) // 2
+                # 超限幅: 真实时钟偏移不可能 > 5s, 超限说明校时被代理延迟污染
+                if abs(offset) > 5000:
+                    logger.warning(
+                        "Server time offset %dms 异常 (RTT=%dms) — 保留旧偏移 %dms",
+                        offset, t1 - t0, self._time_offset,
+                    )
+                    return
+                self._time_offset = offset
                 self._record_offset(self._time_offset)
-                logger.info("Server time synced (offset=%dms)", self._time_offset)
+                logger.info("Server time synced (offset=%dms, rtt=%dms)",
+                            self._time_offset, t1 - t0)
                 return
             logger.warning("Server time sync: empty serverTime in response")
         except Exception as e:

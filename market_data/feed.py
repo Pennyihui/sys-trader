@@ -310,6 +310,46 @@ class MarketDataFeed:
         if switched:
             self._replay_missed_closures()
 
+    # ─── 主连接静默断流看护 (2026-08-17 审计) ───
+
+    def primary_stale_seconds(self) -> float:
+        """主连接最后一条消息距今秒数; 无消息记录返回 -1 (未知)。"""
+        if self._primary_idx >= len(self._conns):
+            return -1.0
+        state = self._conns[self._primary_idx]
+        last = getattr(state, "last_msg_ts", 0.0) or 0.0
+        if last <= 0:
+            return -1.0
+        return time.time() - last
+
+    def force_primary_switch(self):
+        """主连接静默断流时强制切主 (2026-08-17 修复)。
+
+        场景: 代理节点半开 — 主连接 TCP 存活、ping 保活正常、on_close 不触发,
+        但收不到任何行情消息。此时备用连接仍在喂价格 (stalls=0、ws=8/8 全绿),
+        唯独 K 线闭合回调 (仅主连接触发) 永久丢失 → closes 停滞。
+        (2026-08-17 24h 实测: closes 停在 168 达 18h, ws=8/8 价格正常)
+        主动断开主连接 → on_close → _try_switch_primary → _replay_missed_closures
+        补发窗口期漏通知的闭合 K 线。
+        """
+        idx = self._primary_idx
+        if idx >= len(self._conns):
+            return
+        state = self._conns[idx]
+        logger.warning(
+            "PRIMARY STALE: 主连接 %d 无消息 %.0fs — 强制断开触发切主+补发",
+            idx, self.primary_stale_seconds(),
+        )
+        ws = getattr(state, "ws", None)
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception as e:
+                logger.debug("force_primary_switch close exception: %s", e)
+        else:
+            # ws 对象缺失 (半初始化): 直接标记断开并切主
+            self._try_switch_primary(idx)
+
     # ─── 历史数据回填 ───
 
     def backfill(self, limit: int = 100, timeframes: Optional[List[str]] = None):

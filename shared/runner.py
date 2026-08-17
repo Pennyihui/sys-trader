@@ -1454,6 +1454,15 @@ class SystemRunner:
         if connected < len(self.feed._conns):
             logger.warning("WS 连接降级: %d/%d 在线", connected, len(self.feed._conns))
             self._network_diag(reason=f"ws_downgrade_{connected}_{len(self.feed._conns)}")
+        # 主连接静默断流看护 (2026-08-17): TCP 存活但主连接无消息 → 强制切主。
+        # 备用连接一直在喂价格, 整体 stalls=0/ws=8/8 全绿, 唯独 K 线闭合
+        # (仅主连接触发) 停滞 — 此检查填补该盲区。
+        try:
+            stale = self.feed.primary_stale_seconds()
+            if stale >= 0 and stale > 90:
+                self.feed.force_primary_switch()
+        except Exception as e:
+            logger.debug("主连接看护检查失败: %s", e)
 
     def _fetch_exchange_filters(self):
         """从 exchangeInfo 获取 stepSize (数量精度) 与 tickSize (价格精度)。
@@ -1587,7 +1596,9 @@ class SystemRunner:
         logger.info("当前持仓: %s",
                     {s: p.direction for s, p in self.portfolio.positions.items()})
         ok = self.stats["stalls"] == 0 and self.stats["orders_failed"] == 0
-        logger.info("结论: %s", "✅ 稳定" if ok else "⚠️ 存在问题")
+        # 2026-08-17: 结论行用 ASCII — emoji 在 GBK 控制台 (stability_test 直跑)
+        # 会 UnicodeEncodeError 崩掉 (✅\u2705 无法编码)
+        logger.info("结论: %s", "PASS (stable)" if ok else "FAIL (issues)")
         if self.feed:
             self.feed.stop()
 

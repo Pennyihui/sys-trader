@@ -582,3 +582,33 @@ runner 重启后生效（不影响交易正确性, 面板显示"—"直到下次
 - **症状**: tracker.fee_rate / 保本价 / 手续费累计全用 0.001, 与交易所实际扣费不符。
 - **根因**: 从未查询 /fapi/v1/commissionRate。
 - **修复**: FEE_RATE=auto 启动时查询, 2×taker 计往返, 失败保留 0.001 (fail-safe)。
+
+---
+
+## 八、第八轮: 24h 稳定性测试发现 (2026-08-17)
+
+### BUG-039: 主连接静默断流 — closes 停增 18h 但 ws=8/8 全绿
+
+- **日期**: 2026-08-17
+- **严重度**: 🔴 高 (K线闭合/信号链静默失明 18h, 无任何告警)
+- **症状**: 24h 测试中 kline_closes 停在 168 (11:00 起) 达 18h; 但 ws=8/8、价格持续更新、stalls=0、orders_failed=0 — 全部指标看起来健康, 只有 closes 不动。6 个信号/0 下单也源于此。
+- **根因**: 代理节点半开状态 — 主连接 TCP 存活、ping 保活正常、on_close 不触发 → 永不切主; 备用连接仍在喂价格 (所有连接写价格缓存/时间戳), 唯独 K 线闭合回调**仅主连接触发** (notify_closed=conn_id==_primary_idx) 永久丢失。BUG-034 只修了"主连接切换后的补发", 没修"永不切换"。
+- **教训**: 8 路连接的冗余设计只覆盖"连接层故障", 不覆盖"半开静默断流"。健康指标必须分层: 价格新鲜度 (多连接聚合) ≠ 主连接新鲜度。
+- **预防**: 主连接消息年龄看护 — 主连接 90s 无消息强制断开触发切主+补发。
+- **修复**: feed.primary_stale_seconds()/force_primary_switch() + runner._check_connections 每 60s 看护。
+
+### BUG-040: 校时把代理 RTT 误算成时钟偏移 — 批量 -1022 签名无效
+
+- **日期**: 2026-08-17
+- **严重度**: 🟡 中 (代理尖峰窗口内 get_account/positionRisk/income 反复 -1022, 对账/风险同步静默失明)
+- **症状**: 日志大量 "Business error -1021 → retry → 响应 -1022 Signature not valid"; 伴随 "Server time synced (offset=8137ms)" 这类 8 秒假偏移。
+- **根因**: _sync_server_time 的 now 取在请求**前**, 代理尖峰 RTT 达 8s 时整个 RTT 被当成时钟偏移 (offset=8s) → 签名时间戳失真 → -1022。
+- **修复**: 往返延迟剔除 (t0+t1)/2 + |offset|>5000ms 限幅保留旧值。
+- **预防**: 校时必须剔除网络延迟; 极端偏移视为污染丢弃。
+
+### DSH-003: GBK 控制台打 emoji 崩掉 stability_test 结束报告
+
+- **日期**: 2026-08-17
+- **严重度**: 🟢 低
+- **症状**: 24h 结束后 report() 打 "结论: ✅ 稳定" 时 UnicodeEncodeError (gbk 无法编码 \u2705)。
+- **修复**: 结论行改 ASCII (PASS/FAIL)。
